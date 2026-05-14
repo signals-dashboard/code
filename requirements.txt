@@ -11,3 +11,4 @@ lxml_html_clean
 sentence-transformers
 scikit-learn
 pypdf
+supabase
