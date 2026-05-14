@@ -160,6 +160,167 @@ def stable_colour(text: str) -> str:
     return palette[digest % len(palette)]
 
 
+# Domain colours for the visible signal domains.
+# Use these for the main domain badge.
+DOMAIN_COLOURS = {
+    "TECH": "#1E88E5",              # blue
+    "SOCIETY_DIGITAL": "#FFF59D",   # light yellow
+    "SOCIETY_HEALTH": "#F9A825",    # dark yellow
+    "ENVIRONMENT": "#43A047",       # green
+    "POLITICS": "#8E24AA",          # purple
+    "ECONOMY": "#E53935",           # red
+    "SECURITY": "#9E9E9E",          # grey
+    "OTHERS": "#F06292",            # pink
+}
+
+# Flexible matching, because CSV labels may vary slightly.
+DOMAIN_ALIASES = {
+    "TECH": "TECH",
+    "TECHNOLOGY": "TECH",
+    "DIGITAL": "TECH",
+    "AI": "TECH",
+    "SOCIETY DIGITAL": "SOCIETY_DIGITAL",
+    "SOCIETY - DIGITAL": "SOCIETY_DIGITAL",
+    "SOCIETY_DIGITAL": "SOCIETY_DIGITAL",
+    "DIGITAL SOCIETY": "SOCIETY_DIGITAL",
+    "SOCIETY HEALTH": "SOCIETY_HEALTH",
+    "SOCIETY - HEALTH": "SOCIETY_HEALTH",
+    "SOCIETY_HEALTH": "SOCIETY_HEALTH",
+    "HEALTH": "SOCIETY_HEALTH",
+    "ENVIRONMENT": "ENVIRONMENT",
+    "CLIMATE": "ENVIRONMENT",
+    "POLITICS": "POLITICS",
+    "POLITICAL": "POLITICS",
+    "GOVERNANCE": "POLITICS",
+    "ECONOMY": "ECONOMY",
+    "ECONOMIC": "ECONOMY",
+    "BUSINESS": "ECONOMY",
+    "FINANCE": "ECONOMY",
+    "SECURITY": "SECURITY",
+    "DEFENCE": "SECURITY",
+    "DEFENSE": "SECURITY",
+    "OTHERS": "OTHERS",
+    "OTHER": "OTHERS",
+    "MISC": "OTHERS",
+}
+
+DOMAIN_LABELS = {
+    "TECH": "Tech",
+    "SOCIETY_DIGITAL": "Society (digital)",
+    "SOCIETY_HEALTH": "Society (health)",
+    "ENVIRONMENT": "Environment",
+    "POLITICS": "Politics",
+    "ECONOMY": "Economy",
+    "SECURITY": "Security",
+    "OTHERS": "Others",
+}
+
+# Optional: map recurring tags to a domain, so tags can take their own domain hue
+# instead of always inheriting the signal's domain. Add your team's tags here.
+TAG_DOMAIN_MAP = {
+    "#K": "ECONOMY",
+    "#WATER": "ENVIRONMENT",
+    "#AI": "TECH",
+    "#CLIMATE": "ENVIRONMENT",
+    "#HEALTH": "SOCIETY_HEALTH",
+    "#AGEING": "SOCIETY_HEALTH",
+    "#AGING": "SOCIETY_HEALTH",
+    "#GEOPOLITICS": "POLITICS",
+    "#SECURITY": "SECURITY",
+}
+
+TAG_DOMAIN_KEYWORDS = {
+    "TECH": ["ai", "tech", "digital", "robot", "compute", "cyber", "data", "platform"],
+    "SOCIETY_DIGITAL": ["digital", "social", "youth", "education", "media", "identity"],
+    "SOCIETY_HEALTH": ["health", "ageing", "aging", "care", "mental", "disease", "hospital"],
+    "ENVIRONMENT": ["climate", "water", "energy", "food", "carbon", "green", "biodiversity"],
+    "POLITICS": ["politic", "governance", "election", "state", "policy", "geopolitic"],
+    "ECONOMY": ["econom", "finance", "market", "trade", "job", "work", "labour", "labor", "k"],
+    "SECURITY": ["security", "defence", "defense", "war", "conflict", "military", "crime"],
+}
+
+# Lighter tints for tag bubbles. The main domain badge uses the stronger base colour.
+TAG_TINTS = {
+    "TECH": "#BBDEFB",
+    "SOCIETY_DIGITAL": "#FFF9C4",
+    "SOCIETY_HEALTH": "#FFE082",
+    "ENVIRONMENT": "#C8E6C9",
+    "POLITICS": "#E1BEE7",
+    "ECONOMY": "#FFCDD2",
+    "SECURITY": "#E0E0E0",
+    "OTHERS": "#F8BBD0",
+}
+
+
+def normalise_domain(value: str) -> str:
+    """Return the canonical domain key used by the colour map."""
+    text = safe_text(value)
+    if text == "NA":
+        return "OTHERS"
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", text).strip().upper()
+    if not cleaned:
+        return "OTHERS"
+    if cleaned in DOMAIN_ALIASES:
+        return DOMAIN_ALIASES[cleaned]
+    for alias, canonical in DOMAIN_ALIASES.items():
+        if alias in cleaned:
+            return canonical
+    return "OTHERS"
+
+
+def text_colour_for_background(hex_colour: str) -> str:
+    """Pick black/white text based on simple perceived brightness."""
+    hex_colour = hex_colour.lstrip("#")
+    r, g, b = tuple(int(hex_colour[i:i + 2], 16) for i in (0, 2, 4))
+    brightness = (r * 299 + g * 587 + b * 114) / 1000
+    return "#111" if brightness > 165 else "#fff"
+
+
+def chip_html(label, bg, fg=None, bold=False):
+    fg = fg or text_colour_for_background(bg)
+    weight = "600" if bold else "500"
+    return (
+        f'<span style="display:inline-block; padding:0.22rem 0.55rem; margin:0.12rem; '
+        f'border-radius:999px; background:{bg}; color:{fg}; font-size:0.82rem; '
+        f'font-weight:{weight}; border:1px solid rgba(0,0,0,0.08);">{label}</span>'
+    )
+
+
+def render_domain_chip(domain_value):
+    canonical = normalise_domain(domain_value)
+    label = DOMAIN_LABELS.get(canonical, safe_text(domain_value))
+    colour = DOMAIN_COLOURS.get(canonical, DOMAIN_COLOURS["OTHERS"])
+    st.markdown(chip_html(label, colour, bold=True), unsafe_allow_html=True)
+
+
+def guess_tag_domain(tag: str, fallback_domain="OTHERS") -> str:
+    tag = normalize_hashtag(tag)
+    if not tag:
+        return fallback_domain
+    upper_tag = tag.upper()
+    if upper_tag in TAG_DOMAIN_MAP:
+        return TAG_DOMAIN_MAP[upper_tag]
+
+    plain = tag.lstrip("#").replace("_", "-").lower()
+    for domain, keywords in TAG_DOMAIN_KEYWORDS.items():
+        if any(keyword in plain for keyword in keywords):
+            return domain
+    return fallback_domain
+
+
+def render_tag_bubbles(tags, signal_domain="OTHERS", max_items=12, domain_aware=True):
+    clean_tags = [str(tag).strip() for tag in tags if str(tag).strip() and str(tag).strip() != "NA"]
+    if not clean_tags:
+        return
+    fallback = normalise_domain(signal_domain)
+    chips = []
+    for tag in clean_tags[:max_items]:
+        tag_domain = guess_tag_domain(tag, fallback_domain=fallback) if domain_aware else fallback
+        bg = TAG_TINTS.get(tag_domain, TAG_TINTS["OTHERS"])
+        chips.append(chip_html(tag, bg, fg="#222"))
+    st.markdown("".join(chips), unsafe_allow_html=True)
+
+
 def render_bubbles(items, max_items=12):
     clean_items = [str(item).strip() for item in items if str(item).strip() and str(item).strip() != "NA"]
     if not clean_items:
@@ -214,22 +375,23 @@ def render_signal_card(row, idx, semantic_query=""):
 
         st.markdown(f"#### {header}")
 
+        # Topic domain: currently read from sub_channel_name / channel.
+        # Source domain below remains the website domain, e.g. ft.com or bloomberg.com.
+        signal_domain = safe_text(row.get(col_channel)) if col_channel else "OTHERS"
+        if signal_domain != "NA":
+            render_domain_chip(signal_domain)
+
         meta = []
         if col_domain:
-            domain = safe_text(row.get(col_domain))
-            if domain != "NA":
-                meta.append(domain)
+            source_domain = safe_text(row.get(col_domain))
+            if source_domain != "NA":
+                meta.append(source_domain)
         if col_time:
             time_val = safe_text(row.get(col_time))
             if time_val != "NA":
                 meta.append(time_val)
         if meta:
             st.caption(" · ".join(meta))
-
-        if col_channel:
-            channel = channel_label(row.get(col_channel))
-            if channel != "NA":
-                render_bubbles([channel], max_items=1)
 
         if col_summary:
             summary = short_text(row.get(col_summary), 260)
@@ -238,7 +400,7 @@ def render_signal_card(row, idx, semantic_query=""):
 
         parsed = build_combined_hashtags(row)
         if parsed:
-            render_bubbles(parsed[:8])
+            render_tag_bubbles(parsed[:8], signal_domain=signal_domain, domain_aware=True)
         else:
             render_bubbles(["No hashtag (N/A)"], max_items=1)
 
