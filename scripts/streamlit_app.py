@@ -1,6 +1,9 @@
 import hashlib
 import os
 import re
+import streamlit as st
+import pandas as pd
+from supabase import create_client
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +17,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 st.set_page_config(page_title="CSF Signals Search", layout="wide")
+
+@st.cache_resource
+def get_supabase():
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"],
+    )
 
 APP_DIR = Path(__file__).resolve().parent
 # Works whether this file sits at the repo root or inside an app/ folder.
