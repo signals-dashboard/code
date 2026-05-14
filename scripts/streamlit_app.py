@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import altair as alt
 import streamlit as st
 from supabase import create_client
 from sentence_transformers import SentenceTransformer
@@ -205,14 +206,14 @@ DOMAIN_ALIASES = {
 }
 
 DOMAIN_LABELS = {
-    "TECH": "Tech",
-    "SOCIETY_DIGITAL": "Society (digital)",
-    "SOCIETY_HEALTH": "Society (health)",
-    "ENVIRONMENT": "Environment",
-    "POLITICS": "Politics",
-    "ECONOMY": "Economy",
-    "SECURITY": "Security",
-    "OTHERS": "Others",
+    "TECH": "TECH, Science, Frontiers",
+    "SOCIETY_DIGITAL": "SOCIETY: Digital, Culture, Psychology",
+    "SOCIETY_HEALTH": "SOCIETY: Health, Augmentation, Demographics",
+    "ENVIRONMENT": "ENVIRONMENT, Infra, Energy",
+    "POLITICS": "POLITICS, Governance, Power",
+    "ECONOMY": "ECONOMY, Jobs, Learning",
+    "SECURITY": "SECURITY, Military, Grey ops",
+    "OTHERS": "OTHERS",
 }
 
 # Optional: map recurring tags to a domain, so tags can take their own domain hue
@@ -257,15 +258,40 @@ def normalise_domain(value: str) -> str:
     text = safe_text(value)
     if text == "NA":
         return "OTHERS"
+
     cleaned = re.sub(r"[^A-Za-z0-9]+", " ", text).strip().upper()
     if not cleaned:
         return "OTHERS"
+
+    # The WhatsApp group/channel names may appear either as the original long
+    # names or as older short labels. Check the distinctive phrases first so
+    # SOCIETY: Digital does not get misread as TECH just because it contains
+    # the word "Digital".
+    if "SOCIETY" in cleaned and any(k in cleaned for k in ["HEALTH", "AUGMENTATION", "DEMOGRAPHICS"]):
+        return "SOCIETY_HEALTH"
+    if "SOCIETY" in cleaned and any(k in cleaned for k in ["DIGITAL", "CULTURE", "PSYCHOLOGY"]):
+        return "SOCIETY_DIGITAL"
+    if any(k in cleaned for k in ["TECH", "SCIENCE", "FRONTIERS", "TECHNOLOGY"]):
+        return "TECH"
+    if any(k in cleaned for k in ["ENVIRONMENT", "INFRA", "ENERGY", "CLIMATE"]):
+        return "ENVIRONMENT"
+    if any(k in cleaned for k in ["POLITICS", "GOVERNANCE", "POWER", "POLITICAL"]):
+        return "POLITICS"
+    if any(k in cleaned for k in ["ECONOMY", "JOBS", "LEARNING", "ECONOMIC", "BUSINESS", "FINANCE"]):
+        return "ECONOMY"
+    if any(k in cleaned for k in ["SECURITY", "MILITARY", "GREY", "DEFENCE", "DEFENSE"]):
+        return "SECURITY"
+    if any(k in cleaned for k in ["OTHERS", "OTHER", "MISC"]):
+        return "OTHERS"
+
     if cleaned in DOMAIN_ALIASES:
         return DOMAIN_ALIASES[cleaned]
-    for alias, canonical in DOMAIN_ALIASES.items():
-        if alias in cleaned:
-            return canonical
     return "OTHERS"
+
+
+def display_channel_label(value: str) -> str:
+    """Show the original WhatsApp group/channel naming style in the UI."""
+    return DOMAIN_LABELS.get(normalise_domain(value), "OTHERS")
 
 
 def text_colour_for_background(hex_colour: str) -> str:
@@ -288,7 +314,7 @@ def chip_html(label, bg, fg=None, bold=False):
 
 def render_domain_chip(domain_value):
     canonical = normalise_domain(domain_value)
-    label = DOMAIN_LABELS.get(canonical, safe_text(domain_value))
+    label = display_channel_label(domain_value)
     colour = DOMAIN_COLOURS.get(canonical, DOMAIN_COLOURS["OTHERS"])
     st.markdown(chip_html(label, colour, bold=True), unsafe_allow_html=True)
 
@@ -708,6 +734,23 @@ def count_frame(frame, column, label_name, top_n=15, include_na=False):
     return counts.sort_values("count", ascending=False)
 
 
+def render_sorted_bar_chart(counts_df, label_col, count_col="count"):
+    """Render bars sorted from largest to smallest, top to bottom."""
+    if counts_df.empty:
+        return
+    ordered = counts_df.sort_values(count_col, ascending=False).reset_index(drop=True)
+    chart = (
+        alt.Chart(ordered)
+        .mark_bar()
+        .encode(
+            x=alt.X(f"{count_col}:Q", title="Count"),
+            y=alt.Y(f"{label_col}:N", sort="-x", title=None),
+            tooltip=[alt.Tooltip(f"{label_col}:N", title=label_col), alt.Tooltip(f"{count_col}:Q", title="count")],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 @st.cache_data
 def load_data():
     if not CSV_PATH.exists():
@@ -869,8 +912,16 @@ with explore_tab:
         selected_types = st.multiselect("Asset type", asset_types, default=asset_types)
 
         if col_channel:
-            channels = sorted(df[col_channel].dropna().astype(str).unique().tolist())
-            selected_channels = st.multiselect("Channel", channels, default=channels)
+            channels = sorted(
+                df[col_channel].dropna().astype(str).unique().tolist(),
+                key=lambda value: display_channel_label(value),
+            )
+            selected_channels = st.multiselect(
+                "Channel",
+                channels,
+                default=channels,
+                format_func=display_channel_label,
+            )
         else:
             selected_channels = None
 
@@ -1044,19 +1095,19 @@ with overview_tab:
 
     if col_channel and not overview_df.empty:
         st.markdown("### Signals by channel")
-        channel_counts = count_frame(overview_df, col_channel, "channel", top_n=20, include_na=False)
+        channel_overview = overview_df.copy()
+        channel_overview["display_channel"] = channel_overview[col_channel].apply(display_channel_label)
+        channel_counts = count_frame(channel_overview, "display_channel", "channel", top_n=20, include_na=False)
         if not channel_counts.empty:
-            st.bar_chart(channel_counts.set_index("channel"))
-            render_bubbles([f"{row['channel'].upper()} ({row['count']})" for _, row in channel_counts.head(15).iterrows()])
+            render_sorted_bar_chart(channel_counts, "channel")
         else:
             st.write("No channel data available.")
 
     st.markdown("### Most common hashtags")
     tag_counter = Counter(tag for tags in overview_df["parsed_hashtags"] for tag in tags)
     if tag_counter:
-        top_tags_df = pd.DataFrame(tag_counter.most_common(20), columns=["tag", "count"]).set_index("tag")
-        st.bar_chart(top_tags_df)
-        render_bubbles([f"{tag} ({count})" for tag, count in tag_counter.most_common(15)])
+        top_tags_df = pd.DataFrame(tag_counter.most_common(20), columns=["tag", "count"])
+        render_sorted_bar_chart(top_tags_df, "tag")
     else:
         st.write("No hashtags available yet.")
 
@@ -1064,7 +1115,7 @@ with overview_tab:
         st.markdown("### Top source domains")
         domain_df = count_frame(overview_df, col_domain, "source_domain", top_n=20, include_na=False)
         if not domain_df.empty:
-            st.bar_chart(domain_df.set_index("source_domain"))
+            render_sorted_bar_chart(domain_df, "source_domain")
         else:
             st.write("No source domains available.")
 
