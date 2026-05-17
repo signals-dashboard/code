@@ -815,6 +815,46 @@ def flatten_tags(series):
     return counter
 
 
+def hashtag_pair_frame(frame, top_n=5):
+    """Count records where two hashtags appear together.
+
+    Each row contributes at most once to a given pair, even if the same
+    hashtag appears multiple times in that row. The count is therefore
+    number of matching records containing both tags, not raw tag mentions.
+    """
+    pair_counter = Counter()
+
+    if "parsed_hashtags" not in frame.columns:
+        return pd.DataFrame(columns=["hashtag_pair", "records_together"])
+
+    for tags in frame["parsed_hashtags"]:
+        unique_tags = []
+        seen = set()
+        for tag in tags:
+            clean_tag = normalize_hashtag(tag)
+            key = clean_tag.lower()
+            if clean_tag and key not in seen:
+                seen.add(key)
+                unique_tags.append(clean_tag)
+
+        unique_tags = sorted(unique_tags, key=str.lower)
+        if len(unique_tags) < 2:
+            continue
+
+        for i in range(len(unique_tags)):
+            for j in range(i + 1, len(unique_tags)):
+                pair_counter[(unique_tags[i], unique_tags[j])] += 1
+
+    if not pair_counter:
+        return pd.DataFrame(columns=["hashtag_pair", "records_together"])
+
+    rows = [
+        {"hashtag_pair": f"{a} + {b}", "records_together": count}
+        for (a, b), count in pair_counter.most_common(top_n)
+    ]
+    return pd.DataFrame(rows)
+
+
 # -----------------------------
 # Load data
 # -----------------------------
@@ -1047,14 +1087,27 @@ with explore_tab:
     else:
         st.write("No hashtags on this page.")
 
-    st.markdown("### Clusters in matching records")
+    st.markdown("### Semantic clusters in matching records")
+    st.caption(
+        "Clusters are generated from semantic similarity. The auto-label shows the top hashtags inside each cluster, not a hashtag count."
+    )
     cluster_counts = (
         filtered["cluster_label"]
         .value_counts()
-        .rename_axis("cluster")
-        .reset_index(name="count")
+        .rename_axis("auto_label")
+        .reset_index(name="records_in_cluster")
     )
     st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
+
+    st.markdown("### Top hashtag pairs in matching records")
+    st.caption(
+        "Counts how many matching records contain both hashtags together. Each record counts once per pair."
+    )
+    pair_counts = hashtag_pair_frame(filtered, top_n=5)
+    if pair_counts.empty:
+        st.write("Not enough co-occurring hashtags in the current matching records.")
+    else:
+        st.dataframe(pair_counts, use_container_width=True, hide_index=True)
 
     st.markdown("## Results")
     if page_df.empty:
