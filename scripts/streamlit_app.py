@@ -988,6 +988,31 @@ with explore_tab:
             ],
         )
 
+    # Track whether the user has actively narrowed the result set from the sidebar.
+    # Sorting and pagination are intentionally not treated as filters.
+    asset_filter_active = set(selected_types) != set(asset_types)
+    channel_filter_active = (
+        bool(col_channel)
+        and selected_channels is not None
+        and set(selected_channels) != set(channels)
+    )
+    date_filter_active = False
+    if selected_dates and df["message_dt"].notna().any():
+        if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+            selected_start_date, selected_end_date = selected_dates
+        else:
+            selected_start_date = selected_end_date = selected_dates
+        date_filter_active = (selected_start_date != min_date) or (selected_end_date != max_date)
+
+    sidebar_filter_active = any([
+        asset_filter_active,
+        channel_filter_active,
+        date_filter_active,
+        bool(selected_hashtags),
+        bool(keyword_search.strip()),
+        bool(semantic_query.strip()),
+    ])
+
     filtered = df.copy()
     filtered = filtered[filtered[col_type].astype(str).isin(selected_types)]
 
@@ -1080,24 +1105,18 @@ with explore_tab:
         f"of {total_matching} across {total_pages} page(s)."
     )
 
-    st.markdown("### Top hashtags on this page")
-    current_tag_counter = Counter(tag for tags in page_df["parsed_hashtags"] for tag in tags)
-    if current_tag_counter:
-        render_bubbles([f"{tag} ({count})" for tag, count in current_tag_counter.most_common(15)])
-    else:
-        st.write("No hashtags on this page.")
-
-    st.markdown("### Semantic clusters in matching records")
-    st.caption(
-        "Clusters are generated from semantic similarity. The auto-label shows the top hashtags inside each cluster, not a hashtag count."
-    )
-    cluster_counts = (
-        filtered["cluster_label"]
-        .value_counts()
-        .rename_axis("auto_label")
-        .reset_index(name="records_in_cluster")
-    )
-    st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
+    if sidebar_filter_active:
+        st.markdown("### Semantic clusters in matching records")
+        st.caption(
+            "Clusters are generated from semantic similarity. The auto-label shows the top hashtags inside each cluster, not a hashtag count."
+        )
+        cluster_counts = (
+            filtered["cluster_label"]
+            .value_counts()
+            .rename_axis("auto_label")
+            .reset_index(name="records_in_cluster")
+        )
+        st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
 
     st.markdown("### Top hashtag pairs in matching records")
     st.caption(
