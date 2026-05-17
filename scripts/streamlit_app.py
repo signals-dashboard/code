@@ -988,36 +988,6 @@ with explore_tab:
             ],
         )
 
-    # Track whether the user has actively narrowed the result set from the sidebar.
-    # Sorting and pagination are intentionally not treated as filters.
-    asset_filter_active = set(selected_types) != set(asset_types)
-    # If the Channel multiselect is blank, treat it as "no channel filter" rather than "show nothing".
-    # This also protects against old Streamlit session state after code changes.
-    if col_channel and selected_channels == []:
-        selected_channels = channels
-
-    channel_filter_active = (
-        bool(col_channel)
-        and selected_channels is not None
-        and set(selected_channels) != set(channels)
-    )
-    date_filter_active = False
-    if selected_dates and df["message_dt"].notna().any():
-        if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
-            selected_start_date, selected_end_date = selected_dates
-        else:
-            selected_start_date = selected_end_date = selected_dates
-        date_filter_active = (selected_start_date != min_date) or (selected_end_date != max_date)
-
-    sidebar_filter_active = any([
-        asset_filter_active,
-        channel_filter_active,
-        date_filter_active,
-        bool(selected_hashtags),
-        bool(keyword_search.strip()),
-        bool(semantic_query.strip()),
-    ])
-
     filtered = df.copy()
     filtered = filtered[filtered[col_type].astype(str).isin(selected_types)]
 
@@ -1064,16 +1034,12 @@ with explore_tab:
             filtered = filtered.sort_values(["vetoed"], ascending=[True], kind="stable")
     elif sort_by in ["Best by opinion", "Most upvoted"]:
         # Upvotes push records up; any thumbs-down is treated as a veto and pushed below non-vetoed records.
-        # Guard against old cached/deployed dataframes that may not yet have every review column.
-        sort_specs = [
-            ("vetoed", True),
-            ("upvotes", False),
-            ("message_dt", False),
-        ]
-        sort_cols = [col for col, _ in sort_specs if col in filtered.columns]
-        ascending = [asc for col, asc in sort_specs if col in filtered.columns]
-        if sort_cols:
-            filtered = filtered.sort_values(sort_cols, ascending=ascending, na_position="last")
+        sort_cols = ["vetoed", "upvotes"]
+        ascending = [True, False]
+        if "message_dt" in filtered.columns:
+            sort_cols.append("message_dt")
+            ascending.append(False)
+        filtered = filtered.sort_values(sort_cols, ascending=ascending, na_position="last")
     elif col_time and "message_dt" in filtered.columns:
         filtered = filtered.sort_values("message_dt", ascending=False, na_position="last")
 
@@ -1113,19 +1079,6 @@ with explore_tab:
         f"Showing records {start_idx + 1 if total_matching else 0}–{min(end_idx, total_matching)} "
         f"of {total_matching} across {total_pages} page(s)."
     )
-
-    if sidebar_filter_active:
-        st.markdown("### Semantic clusters in matching records")
-        st.caption(
-            "Clusters are generated from semantic similarity. The auto-label shows the top hashtags inside each cluster, not a hashtag count."
-        )
-        cluster_counts = (
-            filtered["cluster_label"]
-            .value_counts()
-            .rename_axis("auto_label")
-            .reset_index(name="records_in_cluster")
-        )
-        st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
 
     st.markdown("### Top hashtag pairs in matching records")
     st.caption(
