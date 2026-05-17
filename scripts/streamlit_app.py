@@ -991,6 +991,11 @@ with explore_tab:
     # Track whether the user has actively narrowed the result set from the sidebar.
     # Sorting and pagination are intentionally not treated as filters.
     asset_filter_active = set(selected_types) != set(asset_types)
+    # If the Channel multiselect is blank, treat it as "no channel filter" rather than "show nothing".
+    # This also protects against old Streamlit session state after code changes.
+    if col_channel and selected_channels == []:
+        selected_channels = channels
+
     channel_filter_active = (
         bool(col_channel)
         and selected_channels is not None
@@ -1059,12 +1064,16 @@ with explore_tab:
             filtered = filtered.sort_values(["vetoed"], ascending=[True], kind="stable")
     elif sort_by in ["Best by opinion", "Most upvoted"]:
         # Upvotes push records up; any thumbs-down is treated as a veto and pushed below non-vetoed records.
-        sort_cols = ["vetoed", "upvotes"]
-        ascending = [True, False]
-        if "message_dt" in filtered.columns:
-            sort_cols.append("message_dt")
-            ascending.append(False)
-        filtered = filtered.sort_values(sort_cols, ascending=ascending, na_position="last")
+        # Guard against old cached/deployed dataframes that may not yet have every review column.
+        sort_specs = [
+            ("vetoed", True),
+            ("upvotes", False),
+            ("message_dt", False),
+        ]
+        sort_cols = [col for col, _ in sort_specs if col in filtered.columns]
+        ascending = [asc for col, asc in sort_specs if col in filtered.columns]
+        if sort_cols:
+            filtered = filtered.sort_values(sort_cols, ascending=ascending, na_position="last")
     elif col_time and "message_dt" in filtered.columns:
         filtered = filtered.sort_values("message_dt", ascending=False, na_position="last")
 
