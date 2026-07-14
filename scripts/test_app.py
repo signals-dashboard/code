@@ -1218,9 +1218,9 @@ with st.spinner("Preparing semantic search and clusters..."):
 # 0. INITIALIZE SESSION STATE (Page Memory)
 # ==========================================
 # active_page is stored in session_state.
-# This ensures Streamlit remembers the active page even when you interact with filters. 
+# This ensures Streamlit remembers the active page even when you interact with filters. This also makes the homepage Signal Repository
 if 'active_page' not in st.session_state:
-    st.session_state['active_page'] = "Signal Dashboard"
+    st.session_state['active_page'] = "Signal Repository"
 
 # ==========================================
 # 1. SIDEBAR WITH INDIVIDUAL BUTTONS
