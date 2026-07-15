@@ -529,7 +529,7 @@ def render_signal_card(row, idx, semantic_query=""):
                 new_tags = st.text_input(
                     "Add hashtag",
                     key=widget_key("add_tag", signal_id),
-                    placeholder="e.g. #AI, #Economy",
+                    placeholder="Add hashtags e.g. #AI, #Economy",
                     label_visibility="collapsed"
                 )
                 if st.button("Save", key=widget_key("save_tag", signal_id), use_container_width=True):
@@ -670,6 +670,7 @@ def save_user_hashtag(signal_id, hashtag):
         supabase.table("signal_hashtags").insert({
             "signal_id": str(signal_id),
             "hashtag": hashtag,
+            "created_by": get_current_user()
         }).execute()
         return True
     except Exception as exc:
@@ -732,6 +733,7 @@ def save_vote(signal_id, vote_type):
         supabase.table("signal_votes").insert({
             "signal_id": str(signal_id),
             "vote_type": vote_type,
+            "created_by": get_current_user(),
         }).execute()
         return True
     except Exception as exc:
@@ -750,6 +752,7 @@ def save_note(signal_id, note):
         supabase.table("signal_notes").insert({
             "signal_id": str(signal_id),
             "note": note,
+            "created_by": get_current_user(),
         }).execute()
         return True
     except Exception as exc:
@@ -1049,6 +1052,31 @@ def render_pagination(total_pages, key_prefix="bottom"):
                     st.rerun()
 
 # -----------------------------
+# User login and storage helper function and variable
+# -----------------------------
+
+# HARDCODED ANALYST LIST (EDIT WHEN NEEDED)
+ANALYSTS = ["Select your name...", 
+            "TERENCE", 
+            "ANGEL", 
+            "SEEMA", 
+            "CHARLENE", 
+            "HAO GUANG", 
+            "FUAD", 
+            "XUE TING", 
+            "GURU", 
+            "JEVON", 
+            "YUN HUI", 
+            "JAKIN", 
+            "RIQQAH", 
+            "MATTHEW", 
+            "GWYNETH"]
+
+# Global helper function to get current_user
+def get_current_user():
+    return st.session_state["current_user"]
+
+# -----------------------------
 # Establish styles
 # -----------------------------
 st.markdown("""
@@ -1214,6 +1242,27 @@ with st.spinner("Preparing semantic search and clusters..."):
     df = add_cluster_labels(df, embeddings, n_clusters=8)
     df = label_clusters(df, col_tags, col_header)
 
+# STATE INITIALISATION
+if "current_user" not in st.session_state:
+    st.session_state["current_user"] = None
+
+# LOGIN PAGE GATEKEEPER
+if not st.session_state['current_user']:
+    st.title("CSF Horizon Scanning Platform")
+    st.write("Who is driving today?")
+    
+    selected_name = st.selectbox("Analyst Name", options=ANALYSTS)
+    
+    if st.button("Enter Workspace →", type="primary", disabled=(selected_name=="Select your name...")):
+        if selected_name != "Select your name...":
+            st.session_state['current_user'] = selected_name
+            st.session_state['active_page'] = "Signal Repository"
+            st.rerun()
+        else:
+            st.warning("Please select a name from the dropdown.")
+            
+    st.stop() # <-- FATAL STOP: Prevents Streamlit from rendering ANY code below this line!
+
 # ==========================================
 # 0. INITIALIZE SESSION STATE (Page Memory)
 # ==========================================
@@ -1226,33 +1275,35 @@ if 'active_page' not in st.session_state:
 # 1. SIDEBAR WITH INDIVIDUAL BUTTONS
 # ==========================================
 with st.sidebar:
-    st.write("**Active User:** Analyst_Placeholder")
+    st.header("CSF Horizon Scanning Platform")
+    st.write(f"**Active User:** {get_current_user()}")
     if st.button("🔄 Change User", use_container_width=True):
-        pass    # Placeholder for login routing later
+        st.session_state["current_user"] = None
+        st.rerun()
 
     st.divider()
 
     # We use use_container_width=True so buttons stretch nicely across the whole sidebar.
     # We dynamically change type="primary" to highlight whichever button is currently active!
-    if st.button("  Ingestion Hub", 
+    if st.button("Ingestion Hub", 
                  use_container_width=True, 
                  type="primary" if st.session_state['active_page'] == "Ingestion Hub" else "secondary"):
         st.session_state['active_page'] = "Ingestion Hub"
         st.rerun()  # Forces an immediate clean reload of the page
     
-    if st.button("  Signal Repository", 
+    if st.button("Signal Repository", 
                  use_container_width=True, 
                  type="primary" if st.session_state['active_page'] == "Signal Repository" else "secondary"):
         st.session_state['active_page'] = "Signal Repository"
         st.rerun()
         
-    if st.button("  Cluster Bank", 
+    if st.button("Cluster Bank", 
                  use_container_width=True, 
                  type="primary" if st.session_state['active_page'] == "Cluster Bank" else "secondary"):
         st.session_state['active_page'] = "Cluster Bank"
         st.rerun()
 
-    if st.button("  Analytics Dashboard",
+    if st.button("Analytics Dashboard",
                  use_container_width=True,
                  type="primary" if st.session_state['active_page'] == "Analytics Dashboard" else "secondary"):
         st.session_state['active_page'] = "Analytics Dashboard"
@@ -1498,6 +1549,7 @@ elif st.session_state['active_page'] == "Cluster Bank":
     st.info("Work in progress... The Best Tech Intern is on the case")
 
 elif st.session_state['active_page'] == "Analytics Dashboard":
+    st.title("Analytics Dashboard")
     st.markdown("## Overview")
 
     if col_time and df["message_dt"].notna().any():
