@@ -117,14 +117,14 @@ def show_image_from_candidates(candidates):
     for cand in candidates:
         resolved = resolve_local_file(cand)
         if resolved:
-            st.image(str(resolved), use_container_width=True)
+            st.image(str(resolved), width='stretch')
             shown = True
             break
 
         if cand.lower().startswith(("http://", "https://")) and any(
             cand.lower().split("?")[0].endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]
         ):
-            st.image(cand, use_container_width=True)
+            st.image(cand, width='stretch')
             shown = True
             break
 
@@ -461,7 +461,7 @@ def render_signal_card(row, idx, semantic_query=""):
             with title_col:
                 st.markdown(title_html, unsafe_allow_html=True)
             with btn_col:
-                with st.popover("View image", use_container_width=True):
+                with st.popover("View image", width='stretch'):
                     shown = show_image_from_candidates(get_image_candidates(row, col_link, col_image))
                     if not shown and is_image:
                         st.caption("Image not found in deployment")
@@ -532,7 +532,7 @@ def render_signal_card(row, idx, semantic_query=""):
                     placeholder="Add hashtags e.g. #AI, #Economy",
                     label_visibility="collapsed"
                 )
-                if st.button("Save", key=widget_key("save_tag", signal_id), use_container_width=True):
+                if st.button("Save", key=widget_key("save_tag", signal_id), width='stretch'):
                     saved = save_user_hashtags(signal_id, new_tags)
                     if saved:
                         st.rerun()
@@ -866,7 +866,7 @@ def render_sorted_bar_chart(counts_df, label_col, count_col="count"):
             tooltip=[alt.Tooltip(f"{label_col}:N", title=label_col), alt.Tooltip(f"{count_col}:Q", title="count")],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
 
 
 @st.cache_data
@@ -1035,12 +1035,12 @@ def render_pagination(total_pages, key_prefix="bottom"):
             elif isinstance(item, int):
                 # Page Number Button
                 btn_type = "primary" if item == st.session_state['current_page'] else "secondary"
-                if st.button(str(item), key=f"{key_prefix}_page_{item}", type=btn_type, use_container_width=True):
+                if st.button(str(item), key=f"{key_prefix}_page_{item}", type=btn_type, width='stretch'):
                     st.session_state['current_page'] = item
                     st.rerun()
             else:
                 # Arrow Navigation Buttons (<<, <, >, >>)
-                if st.button(item, key=f"{key_prefix}_nav_{item}", use_container_width=True):
+                if st.button(item, key=f"{key_prefix}_nav_{item}", width='stretch'):
                     if item == "<<":
                         st.session_state['current_page'] = 1
                     elif item == "<":
@@ -1056,21 +1056,13 @@ def render_pagination(total_pages, key_prefix="bottom"):
 # -----------------------------
 
 # HARDCODED ANALYST LIST (EDIT WHEN NEEDED)
-ANALYSTS = ["Select your name...", 
-            "TERENCE", 
-            "ANGEL", 
-            "SEEMA", 
-            "CHARLENE", 
-            "HAO GUANG", 
-            "FUAD", 
-            "XUE TING", 
-            "GURU", 
-            "JEVON", 
-            "YUN HUI", 
-            "JAKIN", 
-            "RIQQAH", 
-            "MATTHEW", 
-            "GWYNETH"]
+ANALYSTS = sorted([
+    "TERENCE", "ANGEL", "SEEMA", 
+    "CHARLENE", "HAO GUANG",  "FUAD", 
+    "XUE TING", "GURU", "JEVON", 
+    "YUN HUI", "JAKIN", "RIQQAH", 
+    "MATTHEW", "GWYNETH"
+    ])
 
 # Global helper function to get current_user
 def get_current_user():
@@ -1152,6 +1144,16 @@ st.markdown("""
         font-weight: 700 !important;
         text-align: left !important;
         margin: 0 !important;
+    }
+            
+    /* ==========================================
+       5. LOCKED DROPDOWN MENU HEIGHT
+       ========================================== */
+    /* Target selectboxes with many options, prevents them from bleeding out of the box */
+    div[data-baseweb="popover"] div[role="listbox"],
+    ul[data-baseweb="menu"] {
+        max-height: 260px !important; /* Shows ~6-7 rows before scrolling */
+        overflow-y: auto !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -1251,15 +1253,20 @@ if not st.session_state['current_user']:
     st.title("CSF Horizon Scanning Platform")
     st.write("Who is driving today?")
     
-    selected_name = st.selectbox("Analyst Name", options=ANALYSTS)
+    selected_name = st.selectbox(
+        "Analyst Name", 
+        options=ANALYSTS, 
+        index=None,     # leaves the dropdown blank
+        placeholder="Type or select your name..."  
+        )
     
-    if st.button("Enter Workspace →", type="primary", disabled=(selected_name=="Select your name...")):
-        if selected_name != "Select your name...":
+    if st.button("Enter Workspace →", type="primary", disabled=(selected_name==None)):
+        if selected_name:
             st.session_state['current_user'] = selected_name
             st.session_state['active_page'] = "Signal Repository"
             st.rerun()
         else:
-            st.warning("Please select a name from the dropdown.")
+            st.warning("Please select your name from the list to log in.")
             
     st.stop() # <-- FATAL STOP: Prevents Streamlit from rendering ANY code below this line!
 
@@ -1277,34 +1284,34 @@ if 'active_page' not in st.session_state:
 with st.sidebar:
     st.header("CSF Horizon Scanning Platform")
     st.write(f"**Active User:** {get_current_user()}")
-    if st.button("🔄 Change User", use_container_width=True):
+    if st.button("🔄 Change User", width='stretch'):
         st.session_state["current_user"] = None
         st.rerun()
 
     st.divider()
 
-    # We use use_container_width=True so buttons stretch nicely across the whole sidebar.
+    # We use width='stretch' so buttons stretch nicely across the whole sidebar.
     # We dynamically change type="primary" to highlight whichever button is currently active!
     if st.button("Ingestion Hub", 
-                 use_container_width=True, 
+                 width='stretch', 
                  type="primary" if st.session_state['active_page'] == "Ingestion Hub" else "secondary"):
         st.session_state['active_page'] = "Ingestion Hub"
         st.rerun()  # Forces an immediate clean reload of the page
     
     if st.button("Signal Repository", 
-                 use_container_width=True, 
+                 width='stretch', 
                  type="primary" if st.session_state['active_page'] == "Signal Repository" else "secondary"):
         st.session_state['active_page'] = "Signal Repository"
         st.rerun()
         
     if st.button("Cluster Bank", 
-                 use_container_width=True, 
+                 width='stretch', 
                  type="primary" if st.session_state['active_page'] == "Cluster Bank" else "secondary"):
         st.session_state['active_page'] = "Cluster Bank"
         st.rerun()
 
     if st.button("Analytics Dashboard",
-                 use_container_width=True,
+                 width='stretch',
                  type="primary" if st.session_state['active_page'] == "Analytics Dashboard" else "secondary"):
         st.session_state['active_page'] = "Analytics Dashboard"
         st.rerun()
@@ -1520,7 +1527,7 @@ elif st.session_state['active_page'] == "Signal Repository":
     # if pair_counts.empty:
     #     st.write("Not enough co-occurring hashtags in the current matching records.")
     # else:
-    #     st.dataframe(pair_counts, use_container_width=True, hide_index=True)
+    #     st.dataframe(pair_counts, width='stretch', hide_index=True)
 
     # TODO results page
     page_df = filtered.iloc[start_idx:end_idx]
@@ -1609,9 +1616,9 @@ elif st.session_state['active_page'] == "Analytics Dashboard":
             if candidate and candidate in overview_df.columns and candidate not in display_cols:
                 display_cols.append(candidate)
         top_reviewed = overview_df.sort_values(["vetoed", "upvotes", "message_dt"], ascending=[True, False, False], na_position="last").head(10)
-        st.dataframe(top_reviewed[display_cols], use_container_width=True, hide_index=True)
+        st.dataframe(top_reviewed[display_cols], width='stretch', hide_index=True)
 
     if col_fetch_status:
         st.markdown("### Fetch status mix")
         fetch_df = count_frame(overview_df, col_fetch_status, "fetch_status", top_n=20, include_na=True)
-        st.dataframe(fetch_df, use_container_width=True, hide_index=True)
+        st.dataframe(fetch_df, width='stretch', hide_index=True)
