@@ -1074,31 +1074,8 @@ def get_current_user():
 st.markdown("""
     <style>
     /* =========================================================
-       1. STREAMLIT 1.47+ UNIVERSAL OVERFLOW UNBLOCKER
+       2. TARGETED STICKY EXPANDER
        ========================================================= */
-    /* Streamlit 1.47+ wraps elements in multiple new blocks with clipped overflow.
-       We must explicitly force ALL potential parent wrappers to overflow: visible! */
-    [data-testid="stAppViewContainer"] [data-testid="stVerticalBlock"],
-    [data-testid="stAppViewContainer"] [data-testid="stVerticalBlockBorderWrapper"],
-    [data-testid="stAppViewContainer"] [data-testid="stMainBlockContainer"],
-    [data-testid="stAppViewContainer"] [data-testid="stBlock"],
-    [data-testid="stAppViewContainer"] [data-testid="stElementContainer"],
-    div[class*="st-emotion-cache"] {
-        overflow: visible !important;
-    }
-
-    /* =========================================================
-       2. TARGETED STICKY EXPANDER (1.47+ DOM SPECIFIC)
-       ========================================================= */
-    /* Target both the outer element container AND the inner expander box */
-    [data-testid="stElementContainer"]:has(.sticky-marker),
-    [data-testid="stExpander"]:has(.sticky-marker) {
-        position: -webkit-sticky !important;
-        position: sticky !important;
-        top: 3.5rem !important;
-        z-index: 99999 !important; /* Extremely high z-index to float over 1.47+ table headers */
-    }
-
     /* Theme-aware background and border styling */
     [data-testid="stExpander"]:has(.sticky-marker) {
         background-color: var(--background-color) !important;
