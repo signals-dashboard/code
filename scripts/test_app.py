@@ -568,7 +568,7 @@ def render_signal_card(row, idx, semantic_query="", key_prefix: str = "default",
                         st.toast(msg)
                         # ---> CRITICAL: Clear cache so the graph & attached counts update instantly! <---
                         with st.spinner("🤖 Regenerating Evolving Synthesis..."):
-                            success, msg = trigger_evolving_synthesis(current_id, signals_df)
+                            success, msg = trigger_evolving_synthesis(selected_target_cid, signals_df)
                         if success:
                             st.toast(msg)
                         else:
