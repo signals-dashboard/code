@@ -1,6 +1,8 @@
 import hashlib
 import os
 import re
+import uuid
+import google.generativeai as genai
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from supabase import create_client
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
+from streamlit_echarts import st_echarts
 
 
 st.set_page_config(page_title="Signals", layout="wide")
@@ -389,14 +392,15 @@ def build_combined_hashtags(row) -> list:
     return deduped
 
 
-def render_signal_card(row, idx, semantic_query=""):
+def render_signal_card(row, idx, semantic_query="", key_prefix: str = "default", cluster_map: dict = None):
     """Render one signal as a compact height-controlled card for the grid layout."""
+    signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
+    card_key_suffix = f"{key_prefix}_{signal_id}"
+
     with st.container(border=True):
         asset_type = safe_text(row.get(col_type))
         link = safe_text(row.get(col_link)) if col_link else "NA"
 
-        
-        
         # --- DOMAIN & DATE METADATA (Top of card for clean scanning) ---
         # Signal domain: currently read from sub_channel_name / channel.
         # Source domain below remains the website domain, e.g. ft.com or bloomberg.com.
@@ -523,19 +527,58 @@ def render_signal_card(row, idx, semantic_query=""):
                 # render_bubbles(["No tags"], max_items=1)
 
         with btn_col:
-            signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
             # The popover creates a floating menu that DOES NOT break grid alignment!
             with st.popover("➕"):
                 new_tags = st.text_input(
                     "Add hashtag",
-                    key=widget_key("add_tag", signal_id),
+                    key=f"add_tag_{card_key_suffix}",
                     placeholder="Add hashtags e.g. #AI, #Economy",
                     label_visibility="collapsed"
                 )
-                if st.button("Save", key=widget_key("save_tag", signal_id), width='stretch'):
+                if st.button("Save", key=f"save_tag_{card_key_suffix}", width='stretch'):
                     saved = save_user_hashtags(signal_id, new_tags)
                     if saved:
                         st.rerun()
+                    
+        # 1. Fallback: If cluster_map wasn't passed as an argument, build it from global dataframe
+        if 'cluster_map' not in locals() or not cluster_map:
+            cluster_map = dict(zip(clusters_df['id'].astype(str), clusters_df['title']))
+        
+        select_col, attach_button_col = st.columns([5, 1])
+        # 2. Searchable Selectbox (index=None leaves it blank by default!)
+        with select_col:
+            selected_target_cid = st.selectbox(
+                "Attach to an Existing Cluster",
+                options=list(cluster_map.keys()),
+                format_func=lambda cid: cluster_map.get(cid, "Unknown Cluster"),
+                index=None,  # Modern Streamlit: Starts empty so they must actively search/choose!
+                placeholder="Attach to an Existing Cluster",
+                key=f"select_cluster_{card_key_suffix}",
+                label_visibility="collapsed"
+            )
+        
+        # 3. Action Button
+        with attach_button_col:
+            if st.button("🎯", key=f"btn_bind_{card_key_suffix}", type="primary", use_container_width=True):
+                if selected_target_cid:
+                    # Call your modular function passing the single ID as a 1-item list!
+                    success, msg = add_signals_to_cluster([signal_id], selected_target_cid)
+                    
+                    if success:
+                        st.toast(msg)
+                        # ---> CRITICAL: Clear cache so the graph & attached counts update instantly! <---
+                        with st.spinner("🤖 Regenerating Evolving Synthesis..."):
+                            success, msg = trigger_evolving_synthesis(current_id, signals_df)
+                        if success:
+                            st.toast(msg)
+                        else:
+                            st.error(msg)
+                        load_cluster_graph_data.clear() 
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.toast("⚠️ Please select a cluster from the dropdown first.")
 
         # Removed temporarily to streamline results view.
         # upvotes = int(row.get("upvotes", 0))
@@ -571,8 +614,8 @@ def render_signal_card(row, idx, semantic_query=""):
 
         # --- 6. FOOTER (Flexbox Baseline Alignment) ---
         score_text = ""
-        if semantic_query.strip() and "semantic_score" in df.columns:
-            score = df.loc[idx, "semantic_score"]
+        if semantic_query.strip() and "semantic_score" in signals_df.columns:
+            score = signals_df.loc[idx, "semantic_score"]
             if pd.notna(score):
                 score_text = f"Score: {score:.2f}"
                 
@@ -886,7 +929,49 @@ def compute_embeddings(texts):
     model = load_embedding_model()
     return model.encode(texts, show_progress_bar=False)
 
+# Loads tables "clusters" and "cluster_signals" from Supabase
+@st.cache_data(ttl=60, show_spinner=False)
+def load_cluster_graph_data():
+    """
+    Fetches core clusters and junction links from Supabase.
+    Safely enforces column schemas to prevent KeyError on empty database tables.
+    """
+    # Define your expected schemas so Pandas never creates column-less DataFrames
+    CLUSTER_COLS = ["id", "title", "maturity_status", "evolving_synthesis", "created_by", "created_at"]
+    LINK_COLS = ["id", "cluster_id", "signal_id", "added_by", "added_at"]
+    INSIGHTS_COLS = ["id", "cluster_id", "content", "added_by", "created_at"]
 
+    try:
+        supabase = get_supabase()
+        
+        # 1. Fetch Core Clusters
+        clusters_res = supabase.table("clusters").select("*").execute()
+        if clusters_res.data:
+            clusters_df = pd.DataFrame(clusters_res.data)
+        else:
+            clusters_df = pd.DataFrame(columns=CLUSTER_COLS)
+        
+        # 2. Fetch Junction Links (The Edges!)
+        links_res = supabase.table("cluster_signals").select("*").execute()
+        if links_res.data:
+            cluster_signals_df = pd.DataFrame(links_res.data)
+        else:
+            cluster_signals_df = pd.DataFrame(columns=LINK_COLS)
+        
+        # 3. Fetch Cluster Insights
+        insights_res = supabase.table("cluster_insights").select("*").execute()
+        if insights_res.data:
+            cluster_insights_df = pd.DataFrame(insights_res.data)
+        else:
+            cluster_insights_df = pd.DataFrame(columns=INSIGHTS_COLS)
+
+        return clusters_df, cluster_signals_df, cluster_insights_df
+    
+        
+    except Exception as exc:
+        st.error(f"Failed to load cluster data from Supabase: {exc}")
+        # Return empty DataFrames WITH columns instead of None to prevent cascading crashes
+        return pd.DataFrame(columns=CLUSTER_COLS), pd.DataFrame(columns=LINK_COLS)
 
 def add_cluster_labels(df, embedding_matrix, n_clusters=8):
     if len(df) < 3:
@@ -1066,7 +1151,627 @@ ANALYSTS = sorted([
 
 # Global helper function to get current_user
 def get_current_user():
-    return st.session_state["current_user"]
+    return st.session_state.get("current_user", "Anonymous Analyst")
+
+# -----------------------------
+# Cluster helper functions
+# -----------------------------
+def save_new_cluster(title, status, signal_ids):
+    """
+    Saves a new cluster and batch-attaches any selected signals.
+    Returns: (bool success, str message)
+    """
+    try:
+        supabase = get_supabase()
+        current_user = get_current_user()
+        clean_title = title.strip()
+
+        # 1. Duplicate Title Check
+        # .ilike() performs a case-insensitive search (prevents "AI" vs "ai" duplicates)
+        existing = supabase.table("clusters").select("id").ilike("title", clean_title).execute()
+        
+        if existing.data and len(existing.data) > 0:
+            return False, f"⚠️ A cluster named '{clean_title}' already exists! Please choose a unique title."
+        
+        # 2. Generate a unique ID for the cluster right here in Python
+        cluster_id = str(uuid.uuid4())
+        
+        # 3. Insert the core cluster row
+        cluster_payload = {
+            "id": cluster_id,
+            "title": title.strip(),
+            "maturity_status": status,
+            "created_by": current_user,
+            # 'created_at' is omitted so Supabase auto-stamps it with now()
+        }
+        supabase.table("clusters").insert(cluster_payload).execute()
+        
+        # 4. If signals were selected, build a batch array and insert in ONE network call
+        if signal_ids:
+            junction_records = [
+                {
+                    "id": str(uuid.uuid4()),
+                    "cluster_id": cluster_id,
+                    "signal_id": str(sig_id),
+                    "added_by": current_user
+                }
+                for sig_id in signal_ids
+            ]
+            supabase.table("cluster_signals").insert(junction_records).execute()
+            
+        return True, f"Successfully created '{title}' with {len(signal_ids)} attached signals!"
+        
+    except Exception as exc:
+        return False, f"Could not save cluster to Supabase: {exc}"
+
+# Function for generating evolving synthesis
+def trigger_evolving_synthesis(cluster_id, signals_df):
+    # """
+    # Gathers cluster title, attached signals, and human insights,
+    # generates an updated synthesis via LLM, and updates Supabase.
+    # """
+    # try:
+    #     supabase = get_supabase()
+        
+    #     # 1. Gather Context
+    #     c_res = supabase.table("clusters").select("*").eq("id", cluster_id).execute()
+    #     if not c_res.data: return
+    #     cluster = c_res.data[0]
+        
+    #     # Get attached signals
+    #     links = supabase.table("cluster_signals").select("signal_id").eq("cluster_id", cluster_id).execute()
+    #     sig_ids = [str(item['signal_id']) for item in links.data]
+    #     # Use this when migrated signals database to supabase. Meanwhile use df
+    #     # signals = supabase.table("signals").select("search_text").in_("id", sig_ids).execute().data if sig_ids else []
+    #     signals = signals_df[signals_df['signal_id'].astype(str) in sig_ids]
+        
+    #     # Get insights log
+    #     i_res = supabase.table("cluster_insights").select("*").eq("cluster_id", cluster_id).execute
+    #     if not i_res.data: return
+    #     insights = i_res.data
+
+    #     # TODO Configure the API key securely from Streamlit secrets
+    #     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    #     model = genai.GenerativeModel('gemini-1.5-flash')
+        
+    #     # 2. Build the LLM Memory Payload
+    #     sig_texts = "\n---\n".join([s.get('search_text', '') for s in signals])
+    #     insights_text = "\n".join([f"[{i.get('created_at')}] {i.get('added_by')}: {i.get('content')}" for i in insights])
+        
+    #     prompt = f"""
+    #     You are a Strategic Horizon Scanning AI. Generate an 'Evolving Synthesis' (max 100 words) 
+    #     for the following strategic foresight cluster. Analyze the overarching theme, synthesize the 
+    #     evidence from attached signals, and incorporate expert human analyst insights provided.
+        
+    #     CLUSTER TITLE: {cluster['title']}
+        
+    #     ATTACHED SIGNALS EVIDENCE BASE:
+    #     {sig_texts if sig_texts else "No signals attached yet."}
+        
+    #     ANALYST TRIAGE LOG & HUMAN INSIGHTS:
+    #     {insights_text if insights_text else "No human insights recorded yet."}
+        
+    #     Write a cohesive, executive-ready analytical paragraph:
+    #     """
+        
+    #     # 3. Call your LLM SDK (Example using generic chat completion)
+    #     response = model.generate_content(prompt)
+    #     generated_synthesis = response.text.strip()
+        
+    #     # Mocking output for structure:
+    #     # generated_synthesis = f"Strategic synthesis for '{cluster['title']}' integrating {len(sig_ids)} signals and {len(insights)} analyst insights..."
+        
+    #     # 4. Save back to Supabase
+    #     supabase.table("clusters").update({"evolving_synthesis": generated_synthesis}).eq("id", cluster_id).execute()
+        
+    #     return True, "✅ Evolving synthesis regenerated!"
+    
+    # except Exception as exc:
+    #     return False, f"Synthesis generation failed: {exc}"
+    return True, "Works fine"
+
+
+def update_cluster_title(new_title: str, target_cid: str) -> tuple[bool, str]:
+    """
+    Updates the title of an existing cluster in the 'clusters' table.
+    """
+    try:
+        supabase = get_supabase()
+        clean_title = new_title.strip()
+        
+        if not clean_title:
+            return False, "⚠️ Title cannot be empty."
+            
+        # Optional: Prevent renaming to a title that already belongs to ANOTHER cluster
+        existing = supabase.table("clusters").select("id").ilike("title", clean_title).neq("id", target_cid).execute()
+        if existing.data and len(existing.data) > 0:
+            return False, f"⚠️ Another cluster named '{clean_title}' already exists."
+
+        supabase.table("clusters").update({"title": clean_title}).eq("id", target_cid).execute()
+        return True, "✅ Cluster title updated successfully!"
+        
+    except Exception as exc:
+        return False, f"❌ Database error updating title: {exc}"
+
+
+def update_cluster_status(new_status: str, target_cid: str) -> tuple[bool, str]:
+    """
+    Updates the maturity status of an existing cluster in the 'clusters' table.
+    """
+    try:
+        supabase = get_supabase()
+        supabase.table("clusters").update({"maturity_status": new_status}).eq("id", target_cid).execute()
+        return True, f"✅ Maturity status moved to {new_status}!"
+        
+    except Exception as exc:
+        return False, f"❌ Database error updating status: {exc}"
+
+
+def add_cluster_insight(new_insight_text: str, target_cid: str) -> tuple[bool, str]:
+    """
+    Inserts a new analyst insight into the relational 'cluster_insights' table.
+    Note: Requires target_cid to act as the foreign key linking the insight to the cluster.
+    """
+    try:
+        supabase = get_supabase()
+        clean_text = new_insight_text.strip()
+        current_user = get_current_user()
+        
+        if not clean_text:
+            return False, "⚠️ Insight content cannot be empty."
+
+        payload = {
+            "id": str(uuid.uuid4()),
+            "cluster_id": target_cid,
+            "added_by": current_user,
+            "content": clean_text
+        }
+        
+        supabase.table("cluster_insights").insert(payload).execute()
+        return True, "✅ Insight added to log!"
+        
+    except Exception as exc:
+        return False, f"❌ Database error saving insight: {exc}"
+
+
+def add_signals_to_cluster(selected_to_attach: list, target_cid: str) -> tuple[bool, str]:
+    """
+    Batch inserts new signal-to-cluster mappings into the 'cluster_signals' junction table.
+    """
+    if not selected_to_attach:
+        return False, "⚠️ No signals selected to attach."
+        
+    try:
+        supabase = get_supabase()
+        current_user = get_current_user()
+
+        # 1. Fetch existing links to prevent SQL primary/composite key uniqueness crashes
+        existing_res = supabase.table("cluster_signals").select("signal_id").eq("cluster_id", target_cid).execute()
+        existing_sig_ids = {str(row['signal_id']) for row in existing_res.data} if existing_res.data else set()
+        
+        # 2. Filter out signals that are already attached to this cluster
+        new_signals = [str(sid) for sid in selected_to_attach if str(sid) not in existing_sig_ids]
+        
+        if not new_signals:
+            return False, "ℹ️ Selected signals are already attached to this cluster."
+
+        # 3. Build batch insert payload
+        junction_records = [
+            {
+                "id": str(uuid.uuid4()),
+                "cluster_id": target_cid,
+                "signal_id": sid,
+                "added_by": current_user
+            }
+            for sid in new_signals
+        ]
+        
+        supabase.table("cluster_signals").insert(junction_records).execute()
+        return True, f"✅ Successfully linked {len(new_signals)} new signal(s)!"
+        
+    except Exception as exc:
+        return False, f"❌ Database error linking signals: {exc}"
+
+# Function for building node visualisation
+@st.cache_data(show_spinner=False)
+def build_cluster_topology(clusters_df, cluster_signals_df, signals_df, selected_cluster_ids, isolate_mode):
+    nodes = []
+    links = []
+    added_node_ids = set()
+
+    # Track which signals belong to selected clusters so we can show their labels by default!
+    highlighted_signal_ids = set()
+
+    # --- STEP 1: FILTER CLUSTERS BASED ON UI SELECTION ---
+    if isolate_mode and selected_cluster_ids:
+        # ISOLATE: Only show the clusters explicitly chosen in the multiselect
+        active_clusters = clusters_df[clusters_df['id'].astype(str).isin(selected_cluster_ids)]
+    else:
+        # NORMAL: Show all clusters (or filter by your maturity multiselect here!)
+        active_clusters = clusters_df
+
+    # --- STEP 2: BUILD CLUSTER NODES (THE HUBS) ---
+    for _, row in active_clusters.iterrows():
+        cid = str(row['id'])
+        is_selected = cid in selected_cluster_ids if selected_cluster_ids else False
+
+        # Determine Visual Highlighting
+        if is_selected:
+            node_color = "#9B51E0"  # Vibrant Purple for selected/searched clusters
+            size = 55               # Make them physically pop
+            # Place selected nodes at (0,0) so the physics engine centers them!
+            coords = {"x": 0, "y": 0, "fixed": False} 
+            shadow = {"shadowBlur": 20, "shadowColor": "rgba(155, 81, 224, 0.5)"}
+        elif selected_cluster_ids:
+            node_color = "#FF8A8A"  # Muted pink/rose for unselected clusters when a search is active
+            size = 40
+            coords = {}
+            shadow = {}
+        else:
+            node_color = "#FF4B4B"  # Default Streamlit Red when nothing is searched
+            size = 45
+            coords = {}
+            shadow = {}
+
+        node_dict = {
+            "id": cid,
+            "name": row['title'],
+            "node_type": "cluster",
+            "symbolSize": size,
+            "itemStyle": { "color": node_color, **shadow },
+            # REQUIREMENT 3a: Cluster titles always shown and BOLDED
+            "label": { 
+                "show": True, 
+                "position": "right", 
+                "fontWeight": "bold",
+                "fontSize": 13
+            }, 
+        }
+        node_dict.update(coords)
+        nodes.append(node_dict)
+        added_node_ids.add(cid)
+
+    # --- STEP 3: BUILD EDGE LINKS & SIGNAL NODES (THE LEAVES) ---
+    # Identify signals connected to selected clusters
+    if selected_cluster_ids:
+        selected_links = cluster_signals_df[cluster_signals_df['cluster_id'].astype(str).isin(selected_cluster_ids)]
+        highlighted_signal_ids = set(selected_links['signal_id'].astype(str))
+
+    # Find all junction rows connected to our currently active clusters
+    active_links = cluster_signals_df[cluster_signals_df['cluster_id'].astype(str).isin(added_node_ids)]
+
+    for _, row in active_links.iterrows():
+        cid = str(row['cluster_id'])
+        sid = str(row['signal_id'])
+
+        # 1. Create the Edge Link
+        links.append({
+            "source": cid,
+            "target": sid,
+            "lineStyle": { "width": 1.5, "curveness": 0.1 } # Slight curve looks elegant
+        })
+
+        # 2. If we haven't added this Signal Node to the graph yet, add it now!
+        if sid not in added_node_ids:
+            # Look up the signal's title from your master repository DataFrame
+            sig_match = signals_df[signals_df['signal_id'].astype(str) == sid]
+            sig_title = sig_match.iloc[0]['search_text'] if not sig_match.empty else f"Signal #{sid[:6]}"
+            
+            # Show label by default ONLY if connected to a searched cluster!
+            show_signal_label = sid in highlighted_signal_ids
+
+            nodes.append({
+                "id": sid,
+                "name": sig_title[:45] + "...", # Truncate long signal titles on the canvas
+                "node_type": "signal",
+                "symbolSize": 18, # Smaller dots for signals
+                "itemStyle": { "color": "#1C83E1" }, # Cool blue for signals
+                "label": {
+                    "show": show_signal_label,
+                    "position": "right", 
+                    "fontSize": 11
+                },
+                "emphasis": {
+                    "label": { "show": True, "fontWeight": "bold" }
+                }
+            })
+            added_node_ids.add(sid)
+
+    return nodes, links
+
+# Renders the whole cluster view when a cluster node or card is clicked
+def render_cluster_dashboard(cid, clusters_df, cluster_signals_df, signals_df, key_prefix: str = "primary"):
+    target_cid = cid
+    matched_clusters = clusters_df[clusters_df['id'].astype(str).str.strip().str.lower() == target_cid]
+    
+    if matched_clusters.empty:
+        st.error(f"❌ Error: Node ID `{target_cid}` was clicked, but no matching UUID exists in `clusters_df`!")
+    else:
+        st.markdown(f"### 🔎 Inspecting Cluster: `#{target_cid[:6]}`")
+
+        cluster_row = matched_clusters.iloc[0]
+        
+        # Grab attached signals for this cluster
+        attached_links = cluster_signals_df[cluster_signals_df['cluster_id'].astype(str) == target_cid]
+        attached_sig_ids = attached_links['signal_id'].astype(str).tolist()
+        attached_signals_df = signals_df[signals_df['signal_id'].astype(str).isin(attached_sig_ids)]
+
+        col_details, col_insights = st.columns([1.1, 0.9])
+        
+        # =========================================================
+        # COLUMN 1: CLUSTER DETAILS & MICRO-EVIDENCE
+        # =========================================================
+        with col_details:
+            # 1. Editable Title Block
+            with st.container(border=True):
+                title_header_col, edit_btn_col = st.columns([5, 1])
+                with title_header_col:
+                    st.markdown(f"## {cluster_row['title']}")
+                with edit_btn_col:
+                    with st.popover("✏️ Edit"):
+                        st.markdown("#### Rename Cluster")
+                        new_title_input = st.text_input(
+                            "Title", 
+                            value=cluster_row['title'], 
+                            label_visibility="collapsed",
+                            key=f"input_title_{key_prefix}_{target_cid}"
+                            )
+                        if st.button("💾 Save", type="primary", use_container_width=True):
+                            if new_title_input.strip() and new_title_input != cluster_row['title']:
+                                # 1. Update Supabase
+                                success, msg = update_cluster_title(new_title_input.strip(), target_cid)
+                                if success:
+                                    st.toast(msg)
+                                    # 2. Trigger AI Synthesis (Feature 3)
+                                    with st.spinner("🤖 Regenerating Evolving Synthesis..."):
+                                        success, msg = trigger_evolving_synthesis(current_id, signals_df)
+                                    if success:
+                                        st.toast(msg)
+                                    else:
+                                        st.error(msg)
+                                    load_cluster_graph_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        
+                # 2. Metadata Metrics
+                m1, m2 = st.columns(2)
+                raw_date = str(cluster_row.get('created_at', 'Unknown'))[:10]
+                try:
+                    # Convert YYYY-MM-DD to DD/MM/YYYY
+                    formatted_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except ValueError:
+                    formatted_date = raw_date
+                m1.metric("Created", formatted_date)
+                m2.metric("Evidence Base", f"{len(attached_sig_ids)} Signals")
+                
+                # 3. Editable Status Dropdown
+                status_options = ["Active", "KIV", "Presentation-ready", "Archived"]
+                curr_status = cluster_row.get('maturity_status', 'Active')
+                curr_status_idx = status_options.index(curr_status) if curr_status in status_options else 0
+                
+                new_status = st.selectbox(
+                    "Maturity Status", 
+                    status_options, 
+                    index=curr_status_idx, 
+                    key=f"status_{key_prefix}_{target_cid}")
+                if new_status != curr_status:
+                    # Run Supabase update here!
+                    success, msg = update_cluster_status(new_status, target_cid)
+                    if success:
+                        st.toast(msg)
+                        load_cluster_graph_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+                # 4. Evolving Synthesis
+                st.markdown("#### Evolving Synthesis")
+                synthesis_text = cluster_row.get('evolving_synthesis', 'No automated synthesis generated yet. Attach more signals to trigger AI pattern detection.')
+                st.info(synthesis_text)
+                
+                # 5. Micro-Evidence List (Condensed Signal View)
+                st.markdown("#### Attached Signal Summary")
+                with st.container(height=220, border=True):
+                    if attached_signals_df.empty:
+                        st.caption("No signals attached yet.")
+                    else:
+                        for _, sig in attached_signals_df.iterrows():
+                            # Map your category hex colors cleanly
+                            raw_domain = str(sig.get(col_channel, 'OTHERS')).strip().upper()
+                            
+                            clean_domain = normalise_domain(raw_domain)
+                            dot_color = DOMAIN_COLOURS.get(clean_domain, DOMAIN_COLOURS["OTHERS"])
+                            
+                            cat_name = DOMAIN_LABELS.get(clean_domain, 'OTHERS')
+                            
+                            short_title = str(sig.get('search_text', 'Untitled'))[:50] + "..."
+                            
+                            st.markdown(
+                                f"""<div style='line-height: 1.4; margin-bottom: 8px; font-size: 0.85rem;'>
+                                <span style='color: {dot_color}; font-size: 1.1rem;'>●</span> 
+                                <b>[{cat_name}]</b> {short_title}
+                                </div>""", 
+                                unsafe_allow_html=True
+                            )
+
+        # =========================================================
+        # COLUMN 2: HUMAN INSIGHTS LOG
+        # =========================================================
+        with col_insights:
+            with st.container(border=True):
+                st.markdown("#### Analyst Insight Log")
+                
+                # 1. Scrollable Log Container
+                with st.container(height=420, border=True):
+                    # Assume you loaded an `insights_list` (df of rows) from Supabase for this cluster
+                    insights_rows = cluster_insights_df[cluster_insights_df["cluster_id"].astype(str) == target_cid]
+                    
+                    if insights_rows.empty:
+                        st.caption("No human insights recorded yet. Be the first to add strategic context below!")
+                    else:
+                        for _, log in insights_rows.iterrows():
+                            with st.container(border=True):
+                                author = log.get('added_by', 'Anonymous Analyst')
+                                timestamp = datetime.strptime(log.get('created_at', 'Unknown')[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                                st.markdown(
+                                    f"""
+                                    <div style='line-height: 1.3; margin-bottom: 2px;'>
+                                        <small style='color: #808495; font-size: 0.75rem;'><b>{author}</b> • {timestamp}</small>
+                                    </div>
+                                    <div style='font-size: 0.88rem; line-height: 1.4; margin-bottom: 16px; color: var(--text-color);'>
+                                        {log.get('content', '')}
+                                    </div>
+                                    """, 
+                                    unsafe_allow_html=True
+                                )
+
+                # 2. Add New Insight Input Block
+                with st.form(key=f"add_insight_form_{key_prefix}_{target_cid}", clear_on_submit=True):
+                    new_insight_text = st.text_area("Add Strategic Insight", placeholder="Note potential connections, implications, blind spots, or verification needs etc...", height=80, label_visibility="collapsed")
+                    submit_insight = st.form_submit_button("Add Insight", use_container_width=True, type="primary")
+                    
+                    if submit_insight and new_insight_text.strip():                        
+                        # 1. Update Supabase
+                        success, msg = add_cluster_insight(new_insight_text.strip(), target_cid)
+                        if success:
+                            st.toast(msg)
+                            # 2. Trigger AI Synthesis
+                            with st.spinner("🤖 Regenerating Evolving Synthesis..."):
+                                success, msg = trigger_evolving_synthesis(current_id, signals_df)
+                            if success:
+                                st.toast(msg)
+                            else:
+                                st.error(msg)
+                            load_cluster_graph_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(msg)    
+
+        # =========================================================
+        # FULL WIDTH BELOW: SIGNAL MANAGEMENT EXPANDER
+        # =========================================================
+        st.markdown("")
+        with st.expander(f"Manage Cluster Signals ({len(attached_sig_ids)})", expanded=True):
+            
+            st.markdown('<div class="sticky-marker"></div>', unsafe_allow_html=True)    # same formatting style as the signal repository search expander
+            
+            # --- TOP: SEARCH & ADD SIGNAL FUNCTIONALITY ---
+            st.markdown("##### Attach Additional Existing Signals")
+
+            # 1a. Provide a quick keyword filter so analysts don't have to scroll through hundreds of rows
+            if 'manage_form_id' not in st.session_state:
+                st.session_state['manage_form_id'] = 0
+
+            manage_form_id = st.session_state['manage_form_id']
+
+            manage_search = st.text_input(
+                "Filter signals by keyword and select them below", 
+                key=f"manage_signal_search_{key_prefix}_{manage_form_id}", 
+                placeholder="Search for your signals..."
+                )
+            
+            # 1b. Grab whatever IDs the user ALREADY selected (defaults to empty list on first load)
+            # Using the widget's key lets us read the selection before the widget even renders!
+            manage_search_selections = st.session_state.get(f"manage_signal_selector_{manage_form_id}", [])
+
+            # 2. Filter your dataframe BEFORE feeding it to the multiselect!
+            if manage_search.strip():
+                manage_search_matches = signals_df[signals_df['search_text'].astype(str).str.contains(manage_search, case=False, na=False)]
+            else:
+                # Show only the 50 most recent signals by default if no search term is typed
+                manage_search_matches = signals_df.head(50) 
+
+            # 3. THE MAGIC: Pull the dataframe rows for anything currently selected
+            manage_selected_matches = signals_df[signals_df['signal_id'].astype(str).isin(manage_search_selections)]
+        
+            # 4. Combine search results + already selected items, dropping any duplicates!
+            manage_filtered_options = pd.concat([manage_search_matches, manage_selected_matches]).drop_duplicates(subset=['signal_id'])
+                    
+            # 3. Create a dictionary mapping ID -> Display Title for clean UI display
+            manage_signal_map = {}
+            for _, row in manage_filtered_options.iterrows():
+                # Safely grab the UUID from your dataframe
+                sig_id = str(row.get("signal_id", "Unknown-ID"))
+                
+                # Safely grab the header using your existing col_header variable
+                # (If col_header isn't found, fall back to slicing search_text)
+                if col_header and col_header in row and pd.notna(row[col_header]):
+                    header = str(row[col_header])
+                elif "search_text" in row and pd.notna(row["search_text"]):
+                    header = str(row["search_text"])
+                else:
+                    header = "Untitled Signal"
+                    
+                # Truncate header to roughly one line of dropdown text
+                short_header = header[:55] + "..." if len(header) > 55 else header
+                
+                # Safely grab the category/channel using your existing col_channel variable
+                if col_channel and col_channel in row and pd.notna(row[col_channel]):
+                    # If you have your display_channel_label function imported here, wrap it!
+                    category = display_channel_label(str(row[col_channel]))
+                else:
+                    category = "UNCATEGORISED"
+                    
+                # --- CHOOSE YOUR FAVORITE DISPLAY FORMAT BELOW ---
+                # Format A (Category + Header):
+                label = f"[{category}] {short_header}"
+                
+                # Format B (Short Hex ID + Header - Uncomment line below if you prefer this!):
+                # label = f"[#{sig_id[:6]}] {short_header}"
+                
+                manage_signal_map[sig_id] = label
+
+            # 4. Render the clean multiselect tool
+            multi_col, save_col = st.columns([4, 1])
+            
+            with multi_col:
+                selected_to_attach = st.multiselect(
+                    "Select Signals to Attach to this Cluster",
+                    options=list(manage_signal_map.keys()), # Stores raw UUIDs in session state!
+                    key=f"manage_signal_selector_{key_prefix}_{manage_form_id}",  # locks the widget to session state so that we can retrieve the selected options
+                    format_func=lambda x: manage_signal_map.get(x, "Unknown Signal"), # Displays clean strings!
+                    placeholder="Choose signals from the filtered list...", 
+                    label_visibility="collapsed"
+                )
+
+            with save_col:
+                if st.button("Attach Selected Signals", type="primary", width="stretch", disabled=(selected_to_attach==None), key=f"btn_attach_{key_prefix}_{target_cid}"):
+                    if not selected_to_attach:
+                        st.error("Please select signals before adding.")
+                    else:
+                        # TODO create function to add signals to cluster
+                        # 1. Update Supabase
+                        success, msg = add_signals_to_cluster(selected_to_attach, target_cid)
+                        if success:
+                            st.toast(msg)
+                            # 2. Trigger AI Synthesis (Feature 3)
+                            with st.spinner("🤖 Regenerating Evolving Synthesis..."):
+                                success, msg = trigger_evolving_synthesis(current_id, signals_df)
+                            if success:
+                                st.toast(msg)
+                            else:
+                                st.error(msg)
+                            load_cluster_graph_data.clear()
+                            st.session_state['manage_form_id'] += 1
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            st.divider()
+            st.markdown("##### All Signals in Cluster")
+            
+            # --- BOTTOM: RENDER FULL CARDS ---
+            if attached_signals_df.empty:
+                st.info("No signals attached. Use the search tool above to bind intelligence to this theme.")
+            else:
+                # renders in rows of 3 like in the repository
+                cluster_signal_rows = list(attached_signals_df.iterrows())
+                for start in range(0, len(cluster_signal_rows), 3):
+                    cols = st.columns(3)
+                    for offset, (idx, row) in enumerate(cluster_signal_rows[start:start + 3]):
+                        with cols[offset]:
+                            render_signal_card(row, idx, key_prefix=f"cluster_expander_{target_cid}", cluster_map=master_cluster_map)
 
 # -----------------------------
 # Establish styles
@@ -1074,7 +1779,7 @@ def get_current_user():
 st.markdown("""
     <style>
     /* =========================================================
-       2. TARGETED STICKY EXPANDER
+       2. TARGETED EXPANDER FORMATTING
        ========================================================= */
     /* Theme-aware background and border styling */
     [data-testid="stExpander"]:has(.sticky-marker) {
@@ -1132,95 +1837,120 @@ st.markdown("""
         max-height: 260px !important; /* Shows ~6-7 rows before scrolling */
         overflow-y: auto !important;
     }
+            
+    /* =========================================================
+       6. Styling for the sleek canvas navigation overlay
+       ========================================================= */
+    .canvas-nav-tip {
+        position: absolute;
+        top: 12px;
+        right: 16px;
+        background: rgba(140, 145, 155, 0.15);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        color: var(--text-color);
+        border: 1px solid rgba(140, 145, 155, 0.25);
+        z-index: 10;
+        pointer-events: none; /* Lets analysts click and drag right through the text! */
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------
-# Load data
+# Load data for signals and clusters
 # -----------------------------
-df = load_data()
-if df is None:
+signals_df = load_data()
+if signals_df is None:
     st.error(f"Could not find {CSV_PATH}")
     st.stop()
 
+clusters_df, cluster_signals_df, cluster_insights_df = load_cluster_graph_data()
+master_cluster_map = dict(zip(clusters_df['id'].astype(str), clusters_df['title']))
+
 # Flexible column matching
-col_id = pick_column(df, ["signal_id", "record_id"])
+col_id = pick_column(signals_df, ["signal_id", "record_id"])
 if col_id is None:
     def make_signal_id(row):
         raw = str(row.get("final_url", "") or row.get("link_url", "") or row.get("link/image", "") or row.get("scraped_header", ""))
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
-    df["signal_id"] = df.apply(make_signal_id, axis=1)
+    signals_df["signal_id"] = signals_df.apply(make_signal_id, axis=1)
     col_id = "signal_id"
-col_time = pick_column(df, ["message_time", "time of message"])
-col_type = pick_column(df, ["asset_type", "asset type"])
-col_link = pick_column(df, ["final_url", "link_url", "link/image"])
-col_image = pick_column(df, ["image_path", "image file", "local_image_path"])
-col_header = pick_column(df, ["scraped_header", "scraped header of the link"])
-col_channel = pick_column(df, ["sub_channel_name", "sub channel name"])
+col_time = pick_column(signals_df, ["message_time", "time of message"])
+col_type = pick_column(signals_df, ["asset_type", "asset type"])
+col_link = pick_column(signals_df, ["final_url", "link_url", "link/image"])
+col_image = pick_column(signals_df, ["image_path", "image file", "local_image_path"])
+col_header = pick_column(signals_df, ["scraped_header", "scraped header of the link"])
+col_channel = pick_column(signals_df, ["sub_channel_name", "sub channel name"])
 col_summary = None
-col_tags = pick_column(df, ["signal_hashtags", "article_hashtags", "llm_key_hashtags"])
-col_discussion_tags = pick_column(df, ["discussion_hashtags"])
-col_extracted = pick_column(df, ["article_text_extracted", "article_text_extracted?"])
-col_stage = pick_column(df, ["signal_stage", "suggested_stage", "stage"])
-col_domain = pick_column(df, ["source_domain"])
-col_fetch_status = pick_column(df, ["fetch_status"])
-col_tag_origin = pick_column(df, ["tag_origin"])
-col_tag_review = pick_column(df, ["tag_review_status"])
+col_tags = pick_column(signals_df, ["signal_hashtags", "article_hashtags", "llm_key_hashtags"])
+col_discussion_tags = pick_column(signals_df, ["discussion_hashtags"])
+col_extracted = pick_column(signals_df, ["article_text_extracted", "article_text_extracted?"])
+col_stage = pick_column(signals_df, ["signal_stage", "suggested_stage", "stage"])
+col_domain = pick_column(signals_df, ["source_domain"])
+col_fetch_status = pick_column(signals_df, ["fetch_status"])
+col_tag_origin = pick_column(signals_df, ["tag_origin"])
+col_tag_review = pick_column(signals_df, ["tag_review_status"])
 
 if col_type is None:
-    df["asset_type"] = "link"
+    signals_df["asset_type"] = "link"
     col_type = "asset_type"
 
 if col_stage is None:
-    df["signal_stage"] = "NA"
+    signals_df["signal_stage"] = "NA"
     col_stage = "signal_stage"
 
 # Merge human review scores into the main dataset.
-votes_df = vote_summary()
+votes_signals_df = vote_summary()
 if col_id:
-    df[col_id] = df[col_id].astype(str)
-    df = df.merge(votes_df, left_on=col_id, right_on="signal_id", how="left", suffixes=("", "_votes"))
+    signals_df[col_id] = signals_df[col_id].astype(str)
+    signals_df = signals_df.merge(votes_signals_df, left_on=col_id, right_on="signal_id", how="left", suffixes=("", "_votes"))
 else:
-    df["upvotes"] = 0
-    df["downvotes"] = 0
-    df["notes"] = 0
-    df["score"] = 0
+    signals_df["upvotes"] = 0
+    signals_df["downvotes"] = 0
+    signals_df["notes"] = 0
+    signals_df["score"] = 0
 
 for review_col in ["upvotes", "downvotes", "notes", "score"]:
-    if review_col not in df.columns:
-        df[review_col] = 0
-    df[review_col] = df[review_col].fillna(0).astype(int)
+    if review_col not in signals_df.columns:
+        signals_df[review_col] = 0
+    signals_df[review_col] = signals_df[review_col].fillna(0).astype(int)
 
 # Merge hashtags added through the website into the main dataset.
-user_tags_df = user_tag_summary()
+user_tags_signals_df = user_tag_summary()
 if col_id:
-    df = df.merge(user_tags_df, left_on=col_id, right_on="signal_id", how="left", suffixes=("", "_user_tags"))
+    signals_df = signals_df.merge(user_tags_signals_df, left_on=col_id, right_on="signal_id", how="left", suffixes=("", "_user_tags"))
 else:
-    df["user_added_hashtags"] = ""
-if "user_added_hashtags" not in df.columns:
-    df["user_added_hashtags"] = ""
-df["user_added_hashtags"] = df["user_added_hashtags"].fillna("")
+    signals_df["user_added_hashtags"] = ""
+if "user_added_hashtags" not in signals_df.columns:
+    signals_df["user_added_hashtags"] = ""
+signals_df["user_added_hashtags"] = signals_df["user_added_hashtags"].fillna("")
 
 # Downvotes act as vetoes: any veto pushes a record below all non-vetoed records.
-df["vetoed"] = df["downvotes"] > 0
-df["opinion_rank"] = np.where(df["vetoed"], -1_000_000 - df["downvotes"], df["upvotes"])
+signals_df["vetoed"] = signals_df["downvotes"] > 0
+signals_df["opinion_rank"] = np.where(signals_df["vetoed"], -1_000_000 - signals_df["downvotes"], signals_df["upvotes"])
 
 search_cols = [col_header, col_summary, col_tags, col_discussion_tags, col_channel, col_domain, "user_added_hashtags"]
-df["search_text"] = df.apply(lambda row: build_search_text(row, search_cols), axis=1)
+signals_df["search_text"] = signals_df.apply(lambda row: build_search_text(row, search_cols), axis=1)
 
-df["parsed_hashtags"] = df.apply(build_combined_hashtags, axis=1)
-df["has_no_hashtag"] = df["parsed_hashtags"].apply(lambda tags: len(tags) == 0)
+signals_df["parsed_hashtags"] = signals_df.apply(build_combined_hashtags, axis=1)
+signals_df["has_no_hashtag"] = signals_df["parsed_hashtags"].apply(lambda tags: len(tags) == 0)
 
-all_tags = sorted(set(tag for tags in df["parsed_hashtags"] for tag in tags), key=str.lower)
+all_tags = sorted(set(tag for tags in signals_df["parsed_hashtags"] for tag in tags), key=str.lower)
 
-df["message_dt"] = pd.to_datetime(df[col_time], errors="coerce") if col_time else pd.NaT
+signals_df["message_dt"] = pd.to_datetime(signals_df[col_time], errors="coerce") if col_time else pd.NaT
 
 with st.spinner("Preparing semantic search and clusters..."):
-    embeddings = compute_embeddings(df["search_text"].fillna("").tolist())
-    df = add_cluster_labels(df, embeddings, n_clusters=8)
-    df = label_clusters(df, col_tags, col_header)
+    embeddings = compute_embeddings(signals_df["search_text"].fillna("").tolist())
+    signals_df = add_cluster_labels(signals_df, embeddings, n_clusters=8)
+    signals_df = label_clusters(signals_df, col_tags, col_header)
 
+# ============================
+# Rendering starts here
+# ============================
 # STATE INITIALISATION
 if "current_user" not in st.session_state:
     st.session_state["current_user"] = None
@@ -1273,12 +2003,14 @@ with st.sidebar:
                  width='stretch', 
                  type="primary" if st.session_state['active_page'] == "Ingestion Hub" else "secondary"):
         st.session_state['active_page'] = "Ingestion Hub"
+        st.session_state['current_visited_page'] = 'ingestion_hub'    # for state memory so that it can reset the cluster view in cluster bank
         st.rerun()  # Forces an immediate clean reload of the page
     
     if st.button("Signal Repository", 
                  width='stretch', 
                  type="primary" if st.session_state['active_page'] == "Signal Repository" else "secondary"):
         st.session_state['active_page'] = "Signal Repository"
+        st.session_state['current_visited_page'] = 'signal_repository'    # for state memory so that it can reset the cluster view in cluster bank
         st.rerun()
         
     if st.button("Cluster Bank", 
@@ -1291,6 +2023,7 @@ with st.sidebar:
                  width='stretch',
                  type="primary" if st.session_state['active_page'] == "Analytics Dashboard" else "secondary"):
         st.session_state['active_page'] = "Analytics Dashboard"
+        st.session_state['current_visited_page'] = 'analytics_dashboard'    # for state memory so that it can reset the cluster view in cluster bank
         st.rerun()
 
 # ==========================================
@@ -1303,7 +2036,7 @@ with st.sidebar:
 # ==========================================
 if st.session_state['active_page'] == "Ingestion Hub":
     st.title("Ingestion Hub")
-    st.info("Work in progress... The Best Tech Intern is on the case")
+    st.info("🚧 Work in progress...")
 
 # 2b. Signal Dashboard Page
 # ==========================================
@@ -1328,14 +2061,14 @@ elif st.session_state['active_page'] == "Signal Repository":
         col3, col4, col5 = st.columns(3)
         with col3:
             # Creates list of asset types from database
-            asset_types = sorted(df[col_type].dropna().astype(str).unique().tolist())
+            asset_types = sorted(signals_df[col_type].dropna().astype(str).unique().tolist())
             # Multiselect tool
             asset_type_filter = st.multiselect("Asset Type", options=asset_types, default=asset_types, placeholder="Select types...")
         with col4:
             # Pulls channel labels and makes them into categories
             if col_channel:
                 channels = sorted(
-                    df[col_channel].dropna().astype(str).unique().tolist(),
+                    signals_df[col_channel].dropna().astype(str).unique().tolist(),
                     key=lambda value: display_channel_label(value),
                 )
                 # selected_channels is the multiselect tool
@@ -1353,38 +2086,49 @@ elif st.session_state['active_page'] == "Signal Repository":
             hashtag_filter = st.multiselect("Hashtags", options=hashtag_options, default=[], placeholder="Select tags...")            
 
         # --- ROW 3: Date Range & Future Cluster Features (3 equal cols) ---
-        col6, col7, col8 = st.columns(3)
+        col6, col7, col8, col9 = st.columns([2, 2, 1, 1])
         with col6:
             # checks if database has date values. If yes, pulls the min and max date as a range for filtering
-            if df["message_dt"].notna().any():
-                min_date = df["message_dt"].min().date()
-                max_date = df["message_dt"].max().date()
+            if signals_df["message_dt"].notna().any():
+                min_date = signals_df["message_dt"].min().date()
+                max_date = signals_df["message_dt"].max().date()
                 # date input tool
                 date_filter = st.date_input("Signal Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
             else:
                 date_filter = None
             
         with col7:
-            # TODO --- FUTURE SUPABASE CLUSTER FEATURE ---
-            # Uncomment the line below when your database cluster schema is ready:
-            # cluster_id_filter = st.multiselect("Cluster ID Search", options=cluster_ids, placeholder="Select clusters...")
-            pass
+            # --- CLUSTER SEARCH FEATURE ---
+            # Create a mapping dictionary of UUID -> Title
+            cluster_search_map = dict(zip(clusters_df['id'].astype(str), clusters_df['title']))
+
+            cluster_filter = st.multiselect(
+                "Filter by Cluster", 
+                options=list(cluster_search_map.keys()), 
+                format_func=lambda cid: f"{cluster_search_map.get(cid, 'Unknown Cluster')}",
+                placeholder="Type keyword to select multiple clusters...",
+                default=[]
+                )
             
         with col8:
-            # TODO --- FUTURE SUPABASE CLUSTER FEATURE ---
-            # Uncomment the lines below when your database cluster schema is ready:
-            # st.write("") # Adds vertical spacing to align checkbox nicely with dropdowns
-            # st.write("")
-            # show_clustered_only = st.checkbox("Show Clustered Only", value=False)
-            pass
+            # --- CLUSTER SEARCH FEATURE ---
+            st.write("") # Adds vertical spacing to align checkbox nicely with dropdowns
+            st.write("")
+            show_clustered = st.checkbox("Show Clustered Signals", value=True)
 
-    filtered = df.copy()
+        with col9:
+            # --- CLUSTER SEARCH FEATURE ---
+            st.write("") # Adds vertical spacing to align checkbox nicely with dropdowns
+            st.write("")
+            show_unclustered = st.checkbox("Show Unclustered Signals", value=True)
+
+    filtered = signals_df.copy()
     filtered = filtered[filtered[col_type].astype(str).isin(asset_type_filter)]
 
     if col_channel and category_filter is not None:
         filtered = filtered[filtered[col_channel].astype(str).isin(category_filter)]
 
-    if date_filter and df["message_dt"].notna().any():
+    if date_filter and signals_df["message_dt"].notna().any():
         if isinstance(date_filter, tuple) and len(date_filter) == 2:
             start_date, end_date = date_filter
         else:
@@ -1406,26 +2150,51 @@ elif st.session_state['active_page'] == "Signal Repository":
 
     if keyword_query:
         filtered = filtered[
-            filtered["search_text"].astype(str).str.contains(keyword_query, case=False, na=False)
+            (filtered["search_text"].astype(str).str.contains(keyword_query, case=False, na=False)) 
         ]
 
     if semantic_query.strip():
         query_embedding = compute_embeddings([semantic_query])[0]
         sims = cosine_similarity([query_embedding], embeddings)[0]
-        df["semantic_score"] = sims
+        signals_df["semantic_score"] = sims
     else:
-        df["semantic_score"] = np.nan
+        signals_df["semantic_score"] = np.nan
+
+    # 1. Identify all signal IDs currently attached to AT LEAST ONE cluster
+    #    We use a set() for O(1) lookup speed
+    clustered_signal_ids = set(cluster_signals_df['signal_id'].astype(str)) if not cluster_signals_df.empty else set()
+    
+    # 2. APPLY MULTISELECT FILTER (Specific Clusters)
+    #    If the analyst chose specific clusters in the dropdown, narrow down to those exact signals
+    if cluster_filter:
+        matched_links = cluster_signals_df[cluster_signals_df['cluster_id'].astype(str).isin(cluster_filter)]
+        target_signal_ids = set(matched_links['signal_id'].astype(str))
+        filtered = filtered[filtered['signal_id'].astype(str).isin(target_signal_ids)]
+
+    # 3. APPLY CHECKBOX FILTERS (Clustered vs. Unclustered Status)
+    if not show_clustered and not show_unclustered:
+        # State 1: Both unticked -> Show NOTHING
+        filtered = filtered.iloc[0:0]  # Returns empty DF preserving schema
+
+    elif show_clustered and not show_unclustered:
+        # State 2: Only Clustered -> Keep rows whose ID is IN our clustered set
+        filtered = filtered[filtered['signal_id'].astype(str).isin(clustered_signal_ids)]
+
+    elif not show_clustered and show_unclustered:
+        # State 3: Only Unclustered -> Keep rows whose ID is NOT IN our clustered set (~ performs logical NOT)
+        filtered = filtered[~filtered['signal_id'].astype(str).isin(clustered_signal_ids)]
+
+    # State 4 (Both ticked): Skip filtering entirely, leaving filtered_signals_df as-is!
 
     # # Remove these temporarily to streamline results page
     # c1, c2, c3, c4 = st.columns(4)
     # c1.metric("Matching records", total_matching)
-    # c2.metric("Total records", len(df))
+    # c2.metric("Total records", len(signals_df))
     # c3.metric("Total unique hashtags", len(all_tags))
-    # c4.metric("Positive votes", int(df["upvotes"].sum()))
+    # c4.metric("Positive votes", int(signals_df["upvotes"].sum()))
 
     # Pagination: the result set is no longer capped with .head().
     # Instead, all matching records are split into pages.
-    # TODO Change pagination structure
     
     # removed temporarily until figure out how to do custom no. of results. Unless not necessary
     # page_size = st.selectbox("Records per page", [9, 18, 27, 36, 54], index=1)
@@ -1493,7 +2262,7 @@ elif st.session_state['active_page'] == "Signal Repository":
         filtered = filtered.sort_values(by="search_text", ascending=False)
     elif sort_option == "Relevance (Semantic)" and semantic_query.strip():
         # Ensure your search function added a 'semantic_score' column!
-        filtered = filtered.loc[df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
+        filtered = filtered.loc[signals_df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
 
     # # Remove these temporarily to streamline results page
     # st.markdown("### Top hashtag pairs in matching records")
@@ -1518,7 +2287,7 @@ elif st.session_state['active_page'] == "Signal Repository":
             cols = st.columns(3)
             for offset, (idx, row) in enumerate(rows[start:start + 3]):
                 with cols[offset]:
-                    render_signal_card(row, idx, semantic_query=semantic_query)
+                    render_signal_card(row, idx, semantic_query=semantic_query, key_prefix="repo", cluster_map=master_cluster_map)
 
     # ==========================================
     # DYNAMIC PAGINATION BUTTONS (Last Row)
@@ -1530,30 +2299,331 @@ elif st.session_state['active_page'] == "Signal Repository":
 # ==========================================
 elif st.session_state['active_page'] == "Cluster Bank":
     st.title("Cluster Bank")
-    st.info("Work in progress... The Best Tech Intern is on the case")
+    
+    # ==========================================
+    # # CREATE CLUSTER FUNCTION
+    # ==========================================
+    with st.expander("Create New Cluster", expanded=False):
 
+        st.markdown('<div class="sticky-marker"></div>', unsafe_allow_html=True)    # same formatting style as the signal repository search expander
+
+        if 'cluster_form_id' not in st.session_state:
+            st.session_state['cluster_form_id'] = 0
+
+        form_id = st.session_state['cluster_form_id']
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_title = st.text_input(
+                "Cluster Title", 
+                key=f"cluster_title_input_{form_id}", 
+                placeholder="Give it a catchy name. You can't change this later!"
+                )
+        with col2:
+            new_status = st.selectbox(
+                "Maturity Status", 
+                options=["Active", "KIV", "Presentation-ready", "Archived"], 
+                key=f"cluster_status_input_{form_id}"
+                )
+            
+        st.markdown("#### Attach Existing Signals *(Optional)*")
+        
+        # 1a. Provide a quick keyword filter so analysts don't have to scroll through hundreds of rows
+        search_filter = st.text_input(
+            "Filter signals by keyword and select them below", 
+            key=f"cluster_signal_search_{form_id}", 
+            placeholder="Search for your signals...")
+        
+        # 1b. Grab whatever IDs the user ALREADY selected (defaults to empty list on first load)
+        # Using the widget's key lets us read the selection before the widget even renders!
+        current_selections = st.session_state.get(f"cluster_signal_selector_{form_id}", [])
+
+        # 2. Filter your dataframe BEFORE feeding it to the multiselect!
+        if search_filter.strip():
+            search_matches = signals_df[signals_df['search_text'].astype(str).str.contains(search_filter, case=False, na=False)]
+        else:
+            # Show only the 50 most recent signals by default if no search term is typed
+            search_matches = signals_df.head(50) 
+
+        # 3. THE MAGIC: Pull the dataframe rows for anything currently selected
+        selected_matches = signals_df[signals_df['signal_id'].astype(str).isin(current_selections)]
+    
+        # 4. Combine search results + already selected items, dropping any duplicates!
+        filtered_options = pd.concat([search_matches, selected_matches]).drop_duplicates(subset=['signal_id'])
+                
+        # 3. Create a dictionary mapping ID -> Display Title for clean UI display
+        signal_map = {}
+        for _, row in filtered_options.iterrows():
+            # Safely grab the UUID from your dataframe
+            sig_id = str(row.get("signal_id", "Unknown-ID"))
+            
+            # Safely grab the header using your existing col_header variable
+            # (If col_header isn't found, fall back to slicing search_text)
+            if col_header and col_header in row and pd.notna(row[col_header]):
+                header = str(row[col_header])
+            elif "search_text" in row and pd.notna(row["search_text"]):
+                header = str(row["search_text"])
+            else:
+                header = "Untitled Signal"
+                
+            # Truncate header to roughly one line of dropdown text
+            short_header = header[:55] + "..." if len(header) > 55 else header
+            
+            # Safely grab the category/channel using your existing col_channel variable
+            if col_channel and col_channel in row and pd.notna(row[col_channel]):
+                # If you have your display_channel_label function imported here, wrap it!
+                category = display_channel_label(str(row[col_channel]))
+            else:
+                category = "UNCATEGORISED"
+                
+            # --- CHOOSE YOUR FAVORITE DISPLAY FORMAT BELOW ---
+            # Format A (Category + Header):
+            label = f"[{category}] {short_header}"
+            
+            # Format B (Short Hex ID + Header - Uncomment line below if you prefer this!):
+            # label = f"[#{sig_id[:6]}] {short_header}"
+            
+            signal_map[sig_id] = label
+
+        # 4. Render the clean multiselect tool
+        selected_signal_ids = st.multiselect(
+            "Select Signals to Attach",
+            options=list(signal_map.keys()), # Stores raw UUIDs in session state!
+            key=f"cluster_signal_selector_{form_id}",  # locks the widget to session state so that we can retrieve the selected options
+            format_func=lambda x: signal_map.get(x, "Unknown Signal"), # Displays clean strings!
+            placeholder="Choose signals from the filtered list...", 
+            label_visibility="collapsed"
+        )
+        
+        # 5. Create cluster button
+        if st.button("Create Cluster", type="primary", width='stretch', disabled=(new_title==None)):
+            if not new_title.strip():
+                st.error("Please provide a cluster title before saving.")
+            else:
+                # run save_new_cluster() to save to Supabase
+                with st.spinner("Saving cluster to Supabase..."):
+                    success, message = save_new_cluster(
+                        title=new_title, 
+                        status=new_status, 
+                        signal_ids=selected_signal_ids
+                        )
+                if success:
+                    st.session_state['cluster_success_msg'] = message
+                    
+                    # Wipe 4 widget keys from session state
+                    st.session_state['cluster_form_id'] += 1
+
+                    st.rerun()
+                else:
+                    st.error(message)
+
+        if 'cluster_success_msg' in st.session_state:
+            st.toast(f"✅ {st.session_state['cluster_success_msg']}")
+            del st.session_state['cluster_success_msg']
+
+
+    # ==========================================
+    # CLUSTER NODE GRAPH SECTION
+    # ==========================================
+    # Search functions to filter clusters
+
+    # UI CONTROLS
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        selected_cluster_ids = st.multiselect(
+        "Search and Select Clusters",
+        options=list(master_cluster_map.keys()),
+        format_func=lambda cid: f"{master_cluster_map.get(cid, 'Unknown Cluster')}",
+        placeholder="Type keyword to select multiple clusters...",
+        default=None
+    )
+    with col2:
+        maturity_filter = st.multiselect(
+            "Maturity", 
+            ["Active", "KIV", "Presentation-ready", "Archived"], 
+            default=["Active", "KIV", "Presentation-ready"], 
+            placeholder="Filter by maturity..."
+            )
+    with col3:
+        st.write("")
+        st.write("")        
+        isolate_mode = st.checkbox("Isolate View Mode", value=True)
+
+    # PYTHON DATA PIPELINE (Builds the relations before sending it to ECharts to increase performance)
+    # 1. Filter by Maturity Status first
+    active_clusters = clusters_df[clusters_df['maturity_status'].isin(maturity_filter)]
+
+    # 2. Build Nodes and Edges arrays for ECharts
+    nodes, edges = build_cluster_topology(active_clusters, cluster_signals_df, signals_df, selected_cluster_ids, isolate_mode)
+
+    # Render the graph canvas
+    with st.container(border=True):
+        # 1. Inject the CSS grid marker AND the semi-transparent navigation overlay!
+        st.markdown("""
+                    <div class="canvas-nav-tip">
+                    💡 <b>Canvas Controls:</b> Click & drag background to pan • Scroll or pinch to zoom • Click on nodes to view details
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        # --- ECHARTS ANIMATED PAYLOAD ---
+        graph_options = {
+            "backgroundColor": "rgba(140, 145, 155, 0.08)",
+
+            "animationDurationUpdate": 1000,  # 1-second smooth sliding/fading animation!
+            "animationEasingUpdate": "quinticInOut",
+            "series": [{
+                "type": "graph",
+                "layout": "force",
+                "data": nodes,
+                "links": edges,
+                "roam": True,  # Allows users to click-and-drag pan or mousewheel zoom
+
+                "force": {
+                    "repulsion": 500,
+                    "edgeLength": [120, 220],
+                    "gravity": 0.04
+                },
+                # EMPHASIS: What happens when a user hovers or when a node is highlighted
+                "emphasis": {
+                    "focus": "adjacency",  # Automatically dims all non-connected nodes!
+                    "lineStyle": { "width": 3, "color": "#1C83E1" }
+                }
+            }]
+        }
+        
+        # The event handler intercepts the browser click and sends a clean dict to Python
+        clicked_node = st_echarts(
+            options=graph_options, 
+            height="650px",
+            key="cluster_overview_graph", 
+            events={"click": "function(params) { return params.data; }"}
+        )
+
+    # =========================================================
+    # ROUTING CONTROLLER TO CLUSTER / SIGNAL DETAILS
+    # =========================================================
+    # If the analyst just navigated here from another page, wipe old inspection memory!
+    # Navigating to other pages changes st.session_state['current_visited_page'] to another value. Coming back here will keep that value, and only when memory is reset, then we update the value again.
+    if st.session_state.get('current_visited_page') != 'cluster_bank':
+        st.session_state['active_view_type'] = None
+        st.session_state['active_view_id'] = None
+        st.session_state['secondary_cluster_id'] = None
+        st.session_state['trigger_scroll'] = False
+        st.session_state['current_visited_page'] = 'cluster_bank'
+
+    # st.write("Raw Click Payload:", clicked_node)      # 🐞 TEMPORARY DEBUG: Uncomment this line to see EXACTLY what Python receives!
+
+    event_data = clicked_node.get('chart_event', {}) if isinstance(clicked_node, dict) else {}
+    if event_data and event_data.get('id'):
+        new_id = str(event_data.get('id')).strip().lower()
+
+        # KIV AUTOSCROLL FUNCTION
+        if new_id != st.session_state.get('active_view_id'):
+            # Trigger scroll anchor flag
+            st.session_state['trigger_scroll'] = True
+
+        st.session_state['active_view_type'] = event_data.get('node_type')
+        st.session_state['active_view_id'] = new_id
+        # Reset secondary view when a new node is clicked on the canvas
+        st.session_state['secondary_cluster_id'] = None
+
+    # Route from persistent state
+    # KIV AUTOSCROLL FUNCTION
+    st.markdown("<div id='inspection_panel_anchor'></div>", unsafe_allow_html=True)
+
+    current_type = st.session_state['active_view_type']
+    current_id = st.session_state['active_view_id']
+
+    if not current_id:
+        st.info("👆 **Select a node:** Click any cluster or signal dot on the map above to inspect its details.")
+
+    elif current_type == 'signal':
+        # --- SIGNAL INSPECTION MODE ---
+        target_sig_id = current_id
+        sig_row = signals_df[signals_df['signal_id'].astype(str).str.strip().str.lower() == target_sig_id]
+        
+        if sig_row.empty:
+            st.error(f"❌ Error: Node ID `{target_sig_id}` was clicked, but no matching UUID exists in `signals_df`!")
+        else:
+            st.markdown(f"### 🔎 Inspecting Signal: `#{target_sig_id[:6]}`")
+            # 1. Show Parent Cluster Badges
+            parent_links = cluster_signals_df[cluster_signals_df['signal_id'].astype(str) == target_sig_id]
+            parent_cids = parent_links['cluster_id'].astype(str).tolist()
+            parent_clusters = clusters_df[clusters_df['id'].astype(str).isin(parent_cids)]
+            
+            # The badges show up as cool small cards that are clickable to then generate the cluster data below without making this part disappear.
+            # So that it's the same as if you clicked the cluster node
+            # The signal details disappear ONLY if they click another node in the graph
+            st.write("**Connected Strategic Themes:** ")
+            chip_cols = st.columns(len(parent_clusters) if len(parent_clusters) > 0 else 1)
+
+            for idx, (_, c_row) in enumerate(parent_clusters.iterrows()):
+                cid_str = str(c_row['id'])
+                with chip_cols[idx]:
+                    if st.button(f"🎯 {c_row['title']}", key=f"chip_{cid_str}", use_container_width=True):
+                        # Toggle the secondary cluster view!
+                        st.session_state['secondary_cluster_id'] = cid_str
+                        st.rerun()
+
+            st.markdown("")
+            
+            # 2. Render signal card function, check that it matches the function arguments
+            render_signal_card(sig_row.iloc[0], idx=0, key_prefix="inspection", cluster_map=master_cluster_map)
+
+            if st.session_state['secondary_cluster_id']:
+                st.markdown("---")
+                st.markdown("### 🎯 Parent Cluster Overview")
+                render_cluster_dashboard(st.session_state['secondary_cluster_id'], clusters_df, cluster_signals_df, signals_df, key_prefix="secondary")
+
+    elif current_type == 'cluster':
+        # --- CLUSTER DASHBOARD MODE ---
+        render_cluster_dashboard(current_id, clusters_df, cluster_signals_df, signals_df, key_prefix="primary")
+
+    else:
+        # ---> THE CATCH-ALL: Prevents blank screens if data is malformed! <---
+        st.warning(f"⚠️ Unrecognized node click! Python received: `{clicked_node}`")
+        st.caption("Tip: Check `build_cluster_topology` to ensure every node dictionary explicitly includes `'node_type': 'cluster'` or `'node_type': 'signal'`.")
+
+    # AUTO-SCROLL TO CLUSTER/SIGNAL DISPLAY BELOW GRAPH VIEW
+    # KIV because can't nail down the mechanics yet
+    if st.session_state.get('trigger_scroll', False):
+        st.components.v1.html("""
+            <script>
+                const parentDoc = window.parent.document;
+                const anchor = parentDoc.getElementById('inspection_panel_anchor');
+                if (anchor) {
+                    anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            </script>
+        """, height=0)
+        
+        # Reset flag so it only scrolls once when a new node is clicked!
+        st.session_state['trigger_scroll'] = False
+
+# 2d. Analytics Dashboard (Taken from previous "overview" tab)
+# ==========================================
 elif st.session_state['active_page'] == "Analytics Dashboard":
     st.title("Analytics Dashboard")
     st.markdown("## Overview")
 
-    if col_time and df["message_dt"].notna().any():
-        latest_time = df["message_dt"].max()
+    if col_time and signals_df["message_dt"].notna().any():
+        latest_time = signals_df["message_dt"].max()
         recent_cutoff = latest_time - pd.Timedelta(days=30)
-        recent = df[df["message_dt"] >= recent_cutoff].copy()
+        recent = signals_df[signals_df["message_dt"] >= recent_cutoff].copy()
     else:
         latest_time = None
-        recent = df.copy()
+        recent = signals_df.copy()
 
     timeframe = st.radio(
         "Overview timeframe",
         ["All time", "Last 30 days"],
         horizontal=True,
     )
-    overview_df = df.copy() if timeframe == "All time" else recent.copy()
+    overview_df = signals_df.copy() if timeframe == "All time" else recent.copy()
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Signals shown", len(overview_df))
-    m2.metric("All records", len(df))
+    m2.metric("All records", len(signals_df))
     m3.metric("No hashtag (N/A)", int(overview_df["has_no_hashtag"].sum()) if "has_no_hashtag" in overview_df.columns else 0)
     m4.metric("Positive votes", int(overview_df["upvotes"].sum()))
 

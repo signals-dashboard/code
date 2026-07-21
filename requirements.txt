@@ -1,4 +1,4 @@
-streamlit
+streamlit==1.58.0
 pandas
 openpyxl
 pillow
@@ -12,3 +12,5 @@ sentence-transformers
 scikit-learn
 pypdf
 supabase
+streamlit-echarts==0.7.0
+google-generativeai
