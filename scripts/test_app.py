@@ -576,7 +576,7 @@ def render_signal_card(row, idx, semantic_query="", key_prefix: str = "default",
                         load_cluster_graph_data.clear() 
                         st.rerun()
                     else:
-                        st.error(msg)
+                        st.toast(msg)
                 else:
                     st.toast("⚠️ Please select a cluster from the dropdown first.")
 
@@ -1206,68 +1206,70 @@ def save_new_cluster(title, status, signal_ids):
 
 # Function for generating evolving synthesis
 def trigger_evolving_synthesis(cluster_id, signals_df):
-    # """
-    # Gathers cluster title, attached signals, and human insights,
-    # generates an updated synthesis via LLM, and updates Supabase.
-    # """
-    # try:
-    #     supabase = get_supabase()
+#     """
+#     Gathers cluster title, attached signals, and human insights,
+#     generates an updated synthesis via LLM, and updates Supabase.
+#     """
+#     try:
+#         supabase = get_supabase()
         
-    #     # 1. Gather Context
-    #     c_res = supabase.table("clusters").select("*").eq("id", cluster_id).execute()
-    #     if not c_res.data: return
-    #     cluster = c_res.data[0]
+#         # 1. Gather Context
+#         c_res = supabase.table("clusters").select("*").eq("id", cluster_id).execute()
+#         if not c_res.data: return
+#         cluster = c_res.data[0]
         
-    #     # Get attached signals
-    #     links = supabase.table("cluster_signals").select("signal_id").eq("cluster_id", cluster_id).execute()
-    #     sig_ids = [str(item['signal_id']) for item in links.data]
-    #     # Use this when migrated signals database to supabase. Meanwhile use df
-    #     # signals = supabase.table("signals").select("search_text").in_("id", sig_ids).execute().data if sig_ids else []
-    #     signals = signals_df[signals_df['signal_id'].astype(str) in sig_ids]
+#         # Get attached signals
+#         links = supabase.table("cluster_signals").select("signal_id").eq("cluster_id", cluster_id).execute()
+#         sig_ids = [str(item['signal_id']) for item in links.data]
+#         # Use this when migrated signals database to supabase. Meanwhile use df
+#         # signals = supabase.table("signals").select("search_text").in_("id", sig_ids).execute().data if sig_ids else []
+#         signals = signals_df[signals_df['signal_id'].astype(str) in sig_ids]
         
-    #     # Get insights log
-    #     i_res = supabase.table("cluster_insights").select("*").eq("cluster_id", cluster_id).execute
-    #     if not i_res.data: return
-    #     insights = i_res.data
+#         # Get insights log
+#         i_res = supabase.table("cluster_insights").select("*").eq("cluster_id", cluster_id).execute
+#         if not i_res.data: return
+#         insights = i_res.data
 
-    #     # TODO Configure the API key securely from Streamlit secrets
-    #     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    #     model = genai.GenerativeModel('gemini-1.5-flash')
+#         # TODO Configure the API key securely from Streamlit secrets
+#         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+#         model = genai.GenerativeModel('gemini-1.5-flash')
         
-    #     # 2. Build the LLM Memory Payload
-    #     sig_texts = "\n---\n".join([s.get('search_text', '') for s in signals])
-    #     insights_text = "\n".join([f"[{i.get('created_at')}] {i.get('added_by')}: {i.get('content')}" for i in insights])
+#         # 2. Build the LLM Memory Payload
+#         sig_texts = "\n---\n".join([s.get('search_text', '') for s in signals])
+#         insights_text = "\n".join([f"[{i.get('created_at')}] {i.get('added_by')}: {i.get('content')}" for i in insights])
         
-    #     prompt = f"""
-    #     You are a Strategic Horizon Scanning AI. Generate an 'Evolving Synthesis' (max 100 words) 
-    #     for the following strategic foresight cluster. Analyze the overarching theme, synthesize the 
-    #     evidence from attached signals, and incorporate expert human analyst insights provided.
+#         prompt = f"""
+#         You are a Strategic Horizon Scanning AI. Generate an 'Evolving Synthesis' (max 100 words) 
+#         for the following strategic foresight cluster. Analyze the overarching theme, synthesize the 
+#         evidence from attached signals, and incorporate expert human analyst insights provided.
         
-    #     CLUSTER TITLE: {cluster['title']}
+#         CLUSTER TITLE: {cluster['title']}
         
-    #     ATTACHED SIGNALS EVIDENCE BASE:
-    #     {sig_texts if sig_texts else "No signals attached yet."}
+#         ATTACHED SIGNALS EVIDENCE BASE:
+#         {sig_texts if sig_texts else "No signals attached yet."}
         
-    #     ANALYST TRIAGE LOG & HUMAN INSIGHTS:
-    #     {insights_text if insights_text else "No human insights recorded yet."}
+#         ANALYST TRIAGE LOG & HUMAN INSIGHTS:
+#         {insights_text if insights_text else "No human insights recorded yet."}
         
-    #     Write a cohesive, executive-ready analytical paragraph:
-    #     """
+#         Write a cohesive, executive-ready analytical paragraph:
+#         """
         
-    #     # 3. Call your LLM SDK (Example using generic chat completion)
-    #     response = model.generate_content(prompt)
-    #     generated_synthesis = response.text.strip()
+#         # 3. Call your LLM SDK (Example using generic chat completion)
+#         response = model.generate_content(prompt)
+#         generated_synthesis = response.text.strip()
         
-    #     # Mocking output for structure:
-    #     # generated_synthesis = f"Strategic synthesis for '{cluster['title']}' integrating {len(sig_ids)} signals and {len(insights)} analyst insights..."
+#         # Mocking output for structure:
+#         # generated_synthesis = f"Strategic synthesis for '{cluster['title']}' integrating {len(sig_ids)} signals and {len(insights)} analyst insights..."
         
-    #     # 4. Save back to Supabase
-    #     supabase.table("clusters").update({"evolving_synthesis": generated_synthesis}).eq("id", cluster_id).execute()
+#         # 4. Save back to Supabase
+#         supabase.table("clusters").update({"evolving_synthesis": generated_synthesis}).eq("id", cluster_id).execute()
         
-    #     return True, "✅ Evolving synthesis regenerated!"
+#         return True, "✅ Evolving synthesis regenerated!"
     
-    # except Exception as exc:
-    #     return False, f"Synthesis generation failed: {exc}"
+#     except Exception as exc:
+#         return False, f"Synthesis generation failed: {exc}"
+    
+    # Just for testing
     return True, "Works fine"
 
 
@@ -1673,7 +1675,7 @@ def render_cluster_dashboard(cid, clusters_df, cluster_signals_df, signals_df, k
             
             # 1b. Grab whatever IDs the user ALREADY selected (defaults to empty list on first load)
             # Using the widget's key lets us read the selection before the widget even renders!
-            manage_search_selections = st.session_state.get(f"manage_signal_selector_{manage_form_id}", [])
+            manage_search_selections = st.session_state.get(f"manage_signal_selector_{key_prefix}_{manage_form_id}", [])
 
             # 2. Filter your dataframe BEFORE feeding it to the multiselect!
             if manage_search.strip():
@@ -2317,7 +2319,7 @@ elif st.session_state['active_page'] == "Cluster Bank":
             new_title = st.text_input(
                 "Cluster Title", 
                 key=f"cluster_title_input_{form_id}", 
-                placeholder="Give it a catchy name. You can't change this later!"
+                placeholder="Give it a catchy name. You can always change this later!"
                 )
         with col2:
             new_status = st.selectbox(
@@ -2410,7 +2412,9 @@ elif st.session_state['active_page'] == "Cluster Bank":
                 if success:
                     st.session_state['cluster_success_msg'] = message
                     
-                    # Wipe 4 widget keys from session state
+                    # Clear cache so that newly created cluster appears in node graph
+                    load_cluster_graph_data.clear()
+                    # and update widget key
                     st.session_state['cluster_form_id'] += 1
 
                     st.rerun()
