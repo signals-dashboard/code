@@ -1993,8 +1993,12 @@ if 'active_page' not in st.session_state:
 with st.sidebar:
     st.header("CSF Horizon Scanning Platform")
     st.write(f"**Active User:** {get_current_user()}")
-    if st.button("🔄 Change User", width='stretch'):
+    if st.button("👥 Change User", width='stretch'):
         st.session_state["current_user"] = None
+        st.rerun()
+
+    if st.button("🔄 Refresh Data", width='stretch'):
+        load_cluster_graph_data.clear()
         st.rerun()
 
     st.divider()
