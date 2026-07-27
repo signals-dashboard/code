@@ -15,7 +15,10 @@ new_df_filtered = new_df.reindex(columns=master_columns)
 # 4. Stack the old data and the filtered new data together
 merged_df = pd.concat([old_df, new_df_filtered], ignore_index=True)
 
-# 5. Save the combined data back to the main file, overwriting the buggy one
+# 5. Remove duplicate rows based on unique signal ID. Retains original record with keep='first'
+merged_df = merged_df.drop_duplicates(subset=['signal_id'], keep='first')
+
+# 6. Save the combined data back to the main file, overwriting the buggy one
 merged_df.to_csv('data/processed/processed_signals.csv', index=False)
 
 print("Merge complete! The main CSV now has all signals with the original clean structure.")
