@@ -1141,12 +1141,9 @@ def render_pagination(total_pages, key_prefix="bottom"):
 # -----------------------------
 
 # HARDCODED ANALYST LIST (EDIT WHEN NEEDED)
+# Placeholder for now until the team decides on workarounds for security
 ANALYSTS = sorted([
-    "TERENCE", "ANGEL", "SEEMA", 
-    "CHARLENE", "HAO GUANG",  "FUAD", 
-    "XUE TING", "GURU", "JEVON", 
-    "YUN HUI", "JAKIN", "RIQQAH", 
-    "MATTHEW", "GWYNETH"
+    "Anonymous Analyst"
     ])
 
 # Global helper function to get current_user
@@ -1959,7 +1956,7 @@ if "current_user" not in st.session_state:
 
 # LOGIN PAGE GATEKEEPER
 if not st.session_state['current_user']:
-    st.title("CSF Horizon Scanning Platform")
+    st.title("Sensemake")
     st.write("Who is driving today?")
     
     selected_name = st.selectbox(
@@ -1991,7 +1988,7 @@ if 'active_page' not in st.session_state:
 # 1. SIDEBAR WITH INDIVIDUAL BUTTONS
 # ==========================================
 with st.sidebar:
-    st.header("CSF Horizon Scanning Platform")
+    st.header("Sensemake")
     st.write(f"**Active User:** {get_current_user()}")
     if st.button("👥 Change User", width='stretch'):
         st.session_state["current_user"] = None
