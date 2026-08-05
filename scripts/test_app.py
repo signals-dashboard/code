@@ -2188,16 +2188,6 @@ elif st.session_state['active_page'] == "Signal Repository":
         filtered = filtered[~filtered['signal_id'].astype(str).isin(clustered_signal_ids)]
 
     # State 4 (Both ticked): Skip filtering entirely, leaving filtered_signals_df as-is!
-
-    # # Remove these temporarily to streamline results page
-    # c1, c2, c3, c4 = st.columns(4)
-    # c1.metric("Matching records", total_matching)
-    # c2.metric("Total records", len(signals_df))
-    # c3.metric("Total unique hashtags", len(all_tags))
-    # c4.metric("Positive votes", int(signals_df["upvotes"].sum()))
-
-    # Pagination: the result set is no longer capped with .head().
-    # Instead, all matching records are split into pages.
     
     # removed temporarily until figure out how to do custom no. of results. Unless not necessary
     # page_size = st.selectbox("Records per page", [9, 18, 27, 36, 54], index=1)
@@ -2247,14 +2237,14 @@ elif st.session_state['active_page'] == "Signal Repository":
             options=[ 
                 "Newest First", 
                 "Oldest First", 
+                "Relevance (Semantic)", 
                 "Alphabetical (A-Z)", 
-                "Alphabetical (Z-A)",
-                "Relevance (Semantic)"
+                "Alphabetical (Z-A)"
             ],
             label_visibility="collapsed" # Hides the label so it aligns nicely with the text on the left
         )
 
-    # TODO --- APPLY SORTING LOGIC ---
+    # --- APPLY SORTING LOGIC ---
     if sort_option == "Newest First":
         filtered = filtered.sort_values(by="message_dt", ascending=False)
     elif sort_option == "Oldest First":
@@ -2267,18 +2257,7 @@ elif st.session_state['active_page'] == "Signal Repository":
         # Ensure your search function added a 'semantic_score' column!
         filtered = filtered.loc[signals_df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
 
-    # # Remove these temporarily to streamline results page
-    # st.markdown("### Top hashtag pairs in matching records")
-    # st.caption(
-    #     "Counts how many matching records contain both hashtags together. Each record counts once per pair."
-    # )
-    # pair_counts = hashtag_pair_frame(filtered, top_n=5)
-    # if pair_counts.empty:
-    #     st.write("Not enough co-occurring hashtags in the current matching records.")
-    # else:
-    #     st.dataframe(pair_counts, width='stretch', hide_index=True)
-
-    # TODO results page
+    # Render results page
     page_df = filtered.iloc[start_idx:end_idx]
 
     st.markdown("## Results")
@@ -2590,7 +2569,8 @@ elif st.session_state['active_page'] == "Cluster Bank":
         st.caption("Tip: Check `build_cluster_topology` to ensure every node dictionary explicitly includes `'node_type': 'cluster'` or `'node_type': 'signal'`.")
 
     # AUTO-SCROLL TO CLUSTER/SIGNAL DISPLAY BELOW GRAPH VIEW
-    # KIV because can't nail down the mechanics yet
+    # KIV changing st.components.v1.html to latest st version because can't nail down the mechanics yet
+    # supposed to change to st.iframe() or something...
     if st.session_state.get('trigger_scroll', False):
         st.components.v1.html("""
             <script>
